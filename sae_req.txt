@@ -40,6 +40,7 @@ docstring_parser==0.16
 dol==0.3.16
 eindex-callum==0.1.2
 einops==0.7.0
+et_xmlfile==2.0.0
 exceptiongroup==1.2.2
 executing==2.2.0
 fancy-einsum==0.0.3
@@ -123,6 +124,7 @@ nvidia-cusparselt-cu12==0.6.3
 nvidia-nccl-cu12==2.26.2
 nvidia-nvjitlink-cu12==12.6.85
 nvidia-nvtx-cu12==12.6.77
+openpyxl==3.1.5
 orjson==3.10.18
 overrides==7.7.0
 packaging==25.0
