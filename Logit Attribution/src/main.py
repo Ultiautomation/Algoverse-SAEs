@@ -1,8 +1,18 @@
 from data_loader import load_sampled_dataframe
-from model_loader import get_tokenizer, load_model, unload_model
+from model_loader import get_tokenizer, load_model, load_model_with_hidden_states, unload_model
+from attribution.intergrated_gradients import run_ig, get_baseline
 from attribution.visualize import plot_toxicity_score
 from extract_data import extract_refusal_phrases
+from config import load_dotenv
+from huggingface_hub import login
 import sys
+import pandas as pd
+import time
+import os
+import pickle
+from dotenv import load_dotenv
+load_dotenv()
+hugging_face_token = os.getenv('hugging_face_token')
 
 def main():
     # Load toxicity scored data (CSV data)
@@ -26,23 +36,86 @@ def main():
     pd.set_option('display.max_colwidth', None)
     print (sampled_df)
 
+    # Extract refusal phrases and insert a new column to prepare for IG
+    refusal_terms = [
+    "i'm sorry", "i am sorry", "i cannot", "i can't", "i am unable", 
+    "as an ai", "i do not", "my apologies", "i won't", "i shouldn’t", 
+    "unfortunately", "it is not appropriate", "i don't have the ability", 
+    "i'm not able", "i do not have", "do not follow", "is a serious crime", 
+    "illegal", "harmful", "unethical", "should not be"]
 
+    sampled_df["Refusal_outputs"] = sampled_df["Instruct_Model_Response"].apply(
+    lambda x: extract_refusal_phrases(x, refusal_terms)
+    )
+
+    refusal_is_na = sampled_df['Refusal_outputs'].isna().any()
+
+    print(f"Prompts have a corresponding NaN value for refusal phrase: {refusal_is_na}")
+    
+    # Ensure you are logged in to huggingface
+    # Login to Hugging Face
+    login(token= hugging_face_token)
     # Set model names
     base_model_name = "google/gemma-2-2b"
     tuned_model_name = "google/gemma-2-2b-it"
-    sys.exit()
+    
     # Load tokenizer once
     tokenizer = get_tokenizer(base_model_name)
 
-    # Load and unload base model (as an example)
-    tuned_model = load_model(tuned_model_name)
-    print("Base model loaded.")
-    
-    # [Do something with model here...]
+    # Settings to intitiate IG
+    SAVE_EVERY = 10
+    INTERMEDIATE_SAVE_PATH = "outputs/ig_partial_results.pkl"
 
-    # Clean up
-    unload_model(tuned_model)
-    print("Model unloaded from memory.")
+    # Restore partial results
+    records = []
+    start_index = 0
+    if os.path.exists(INTERMEDIATE_SAVE_PATH):
+        with open(INTERMEDIATE_SAVE_PATH, "rb") as f:
+            records = pickle.load(f)
+        start_index = len(records)
+        print(f"Resuming from index {start_index}")
+
+    # Run attribution
+    for i, (_, row) in enumerate(sampled_df.iloc[start_index:].iterrows(), start=start_index):
+        prompt = row['Prompt']
+        print(f"\n[Prompt {i}] {prompt}")
+
+        refusal_terms = row.get("Refusal_outputs", "").split("; ")
+        refusal_terms = [term.strip() for term in refusal_terms if term.strip()]
+
+        if not refusal_terms:
+            print("No refusal terms found; skipping.")
+            continue
+
+        try:
+            start_time = time.time()
+            instruct_model = load_model(tuned_model_name)
+            print("tuned model loaded.")
+            instruct_ig = run_ig(prompt, instruct_model, tokenizer, refusal_terms, baseline_strategy="pad", n_steps=20)
+            unload_model(instruct_model)
+            print("tuned model unloaded from memory.")
+            elapsed = time.time() - start_time
+
+            records.append({
+                'Prompt': prompt,
+                'Prompt_toxicity': row['Prompt_toxicity'],
+                'Instruct_Response': row['Instruct_Model_Response'],
+                'Instruct_IG': instruct_ig,
+                'Time_Taken': elapsed
+            })
+
+            if (i + 1) % SAVE_EVERY == 0:
+                with open(INTERMEDIATE_SAVE_PATH, "wb") as f:
+                    pickle.dump(records, f)
+                print(f"✅ Saved progress at {i + 1} prompts.")
+
+        except Exception as e:
+            print(f"❌ Error on prompt {i}: {e}")
+            continue
+
+    # Final save
+    new_df = pd.DataFrame(records)
+    new_df.to_pickle("ig_full_results.pkl")
 
 if __name__ == "__main__":
     main()
