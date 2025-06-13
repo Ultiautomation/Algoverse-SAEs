@@ -1,6 +1,7 @@
 from data_loader import load_sampled_dataframe
 from model_loader import get_tokenizer, load_model, unload_model
 from attribution.visualize import plot_toxicity_score
+from extract_data import extract_refusal_phrases
 import sys
 
 def main():
@@ -11,6 +12,20 @@ def main():
 
     # Visualise the toxicity scores for sampling purposes
     plot_toxicity_score (scored_df)
+
+    #Sampling
+    # 1. Filter prompts above average toxicity
+    avg_toxicity = scored_df['Prompt_toxicity'].mean()
+    filtered_df = scored_df[scored_df['Prompt_toxicity'] > avg_toxicity]
+
+    # 2. Determine sample size and sample
+    sample_size = len(filtered_df)
+    print(f"Sample size: {sample_size} out of {len(scored_df)}")
+
+    sampled_df = filtered_df.copy()
+    pd.set_option('display.max_colwidth', None)
+    print (sampled_df)
+
 
     # Set model names
     base_model_name = "google/gemma-2-2b"
