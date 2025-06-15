@@ -1,56 +1,81 @@
 from data_loader import load_sampled_dataframe
-from model_loader import get_tokenizer, load_model, load_model_with_hidden_states, unload_model
-from attribution.intergrated_gradients import run_ig, get_baseline
-from attribution.visualize import plot_toxicity_score
+from model_loader import get_tokenizer, load_model, unload_model
+from intergrated_gradients import run_ig, get_baseline
+from visualize import plot_toxicity_score, analyse_ig_results, find_most_common_refusal_term
 from extract_data import extract_refusal_phrases
-from dotenv import load_dotenv
+from config import load_dotenv
 from huggingface_hub import login
 import sys
 import pandas as pd
 import time
 import os
 import pickle
-
+from dotenv import load_dotenv
 load_dotenv()
 hugging_face_token = os.getenv('hugging_face_token')
 
 def main():
-    # Load toxicity scored data (CSV data)
-    scored_df = load_sampled_dataframe("/root/Algoverse-SAEs/Logit_Attribution/data/gemma_responses_toxicity_scoring_with_prompt_scoring.csv")
-    scored_df = scored_df.reset_index().rename(columns={'index': 'PromptIndex'})
-    print(f"Columns in the scored dataframe: {scored_df.columns}")
+    # Set output file path
+    sampled_path = "outputs/sampled.csv"
+    
+    # Check if sampled.csv exists
+    if os.path.exists(sampled_path):
+        print("✅ Found existing 'sampled.csv', loading it...")
+        sampled_df = pd.read_csv(sampled_path)
+        pd.set_option('display.max_colwidth', None)
+        print(sampled_df.head())
+        sampled_path1 = "outputs/plots/common_refusal_terms.png"
+        if os.path.exists(sampled_path1):
+            print("✅ Found existing 'common_refusal_terms.png', no need to generate...")
+        else: 
+            find_most_common_refusal_term(sampled_df)
+            print("most_common_refusal_terms_plot generated")
+    else:
+        print("⚙️ No 'sampled.csv' found. Running sampling...")
+        # Load toxicity scored data (CSV data)
+        scored_df = load_sampled_dataframe("/workspace/data/gemma_responses_toxicity_scoring_with_prompt_scoring.csv")
+        scored_df = scored_df.reset_index().rename(columns={'index': 'PromptIndex'})
+        print(f"Columns in the scored dataframe: {scored_df.columns}")
+    
+        # Visualise the toxicity scores for sampling purposes
+        plot_toxicity_score (scored_df)
+    
+        #Sampling
+        # 1. Filter prompts above average toxicity
+        avg_toxicity = scored_df['Prompt_toxicity'].mean()
+        filtered_df = scored_df[scored_df['Prompt_toxicity'] > avg_toxicity]
+    
+        # 2. Determine sample size and sample
+        sample_size = len(filtered_df)
+        print(f"Sample size: {sample_size} out of {len(scored_df)}")
+    
+        sampled_df = filtered_df.copy()
+        pd.set_option('display.max_colwidth', None)
+        print (sampled_df)
 
-    # Visualise the toxicity scores for sampling purposes
-    plot_toxicity_score (scored_df)
-
-    #Sampling
-    # 1. Filter prompts above average toxicity
-    avg_toxicity = scored_df['Prompt_toxicity'].mean()
-    filtered_df = scored_df[scored_df['Prompt_toxicity'] > avg_toxicity]
-
-    # 2. Determine sample size and sample
-    sample_size = len(filtered_df)
-    print(f"Sample size: {sample_size} out of {len(scored_df)}")
-
-    sampled_df = filtered_df.copy()
-    pd.set_option('display.max_colwidth', None)
-    print (sampled_df)
-
-    # Extract refusal phrases and insert a new column to prepare for IG
-    refusal_terms = [
-    "i'm sorry", "i am sorry", "i cannot", "i can't", "i am unable", 
-    "as an ai", "i do not", "my apologies", "i won't", "i shouldn’t", 
-    "unfortunately", "it is not appropriate", "i don't have the ability", 
-    "i'm not able", "i do not have", "do not follow", "is a serious crime", 
-    "illegal", "harmful", "unethical", "should not be"]
-
-    sampled_df["Refusal_outputs"] = sampled_df["Instruct_Model_Response"].apply(
-    lambda x: extract_refusal_phrases(x, refusal_terms)
-    )
-
-    refusal_is_na = sampled_df['Refusal_outputs'].isna().any()
-
-    print(f"Prompts have a corresponding NaN value for refusal phrase: {refusal_is_na}")
+        # ✅ Save sampled dataframe to file
+        os.makedirs("outputs", exist_ok=True)  # ensure the directory exists
+        sampled_df.to_csv(sampled_path, index=False)
+        print(f"📁 Sampled data saved to: {sampled_path}")
+        
+    if "Refusal_outputs" not in sampled_df.columns:
+        # Extract refusal phrases and insert a new column to prepare for IG
+        refusal_terms = [
+        "i'm sorry", "i am sorry", "i cannot", "i can't", "i am unable", 
+        "as an ai", "i do not", "my apologies", "i won't", "i shouldn’t", 
+        "unfortunately", "it is not appropriate", "i don't have the ability", 
+        "i'm not able", "i do not have", "do not follow", "is a serious crime", 
+        "illegal", "harmful", "unethical", "should not be"]
+    
+        sampled_df["Refusal_outputs"] = sampled_df["Instruct_Model_Response"].apply(
+        lambda x: extract_refusal_phrases(x, refusal_terms)
+        )
+    
+        refusal_is_na = sampled_df['Refusal_outputs'].isna().any()
+    
+        print(f"Prompts have a corresponding NaN value for refusal phrase: {refusal_is_na}")
+    else: 
+        print("'Refusal_outputs' column already exists. Skipping extraction step.")
     
     # Ensure you are logged in to huggingface
     login(token= hugging_face_token)
@@ -117,6 +142,10 @@ def main():
     new_df = pd.DataFrame(records)
     new_df.to_pickle("ig_full_results.pkl")
 
+    #Analyse
+    ig_results_df = pd.read_pickle("ig_full_results.pkl")
+    analyse_ig_results(ig_results_df)
+    
     ## RUN IG LAYERWISE
     # Settings for layerwise IG
     SAVE_EVERY = 10
