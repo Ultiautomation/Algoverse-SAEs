@@ -140,7 +140,8 @@ def analyse_ig_results (df):
     # Create output directory if not exists
     output_dir = "outputs/ig_plots"
     os.makedirs (output_dir, exist_ok=True)
-            
+    
+        
     # Filter rows with valid IG data
     valid_rows = ig_results_df[ig_results_df["Instruct_IG"].apply(lambda x: isinstance(x, list))]
     
@@ -186,7 +187,7 @@ def analyse_ig_results (df):
         plt.close()
         print(f" Saved batch {batch_num +1} to {save_path}")
         
-def find_most_common_refusal_term (df)
+def find_most_common_refusal_term (df):
     output_dir = "outputs/plots"
     os.makedirs (output_dir, exist_ok=True)
     refusal_counts = sampled_df['Refusal_outputs'].dropna().explode().value_counts()
