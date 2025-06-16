@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 import math
 import os
 from collections import Counter
-    
+import seaborn as sns    
+
 def plot_toxicity_score (df):
 
     output_dir = "outputs/plots"
@@ -194,4 +195,27 @@ def find_most_common_refusal_term (df):
     refusal_counts.plot(kind='bar', figsize=(12, 4), title='Most Common Refusal Phrases')
     plt.tight_layout()
     plt.savefig(os.join(output_dir, "common_refusal_terms.png"), dpi=300)
+    plt.close()
+
+def token_attributions(df):
+    output_dir = "outputs/plots"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Filter out rows with NaN in 'Instruct_IG'
+    filtered_df = df[df['Instruct_IG'].notna()]
+
+    # Count the number of tokens in each IG list
+    token_counts = filtered_df['Instruct_IG'].apply(lambda x: len(x) if isinstance(x, list) else 0)
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    token_counts.value_counts().sort_index().plot(kind='bar', color='skyblue')
+    plt.title('Distribution of Token Counts in Instruct IG')
+    plt.xlabel('Number of Tokens')
+    plt.ylabel('Frequency')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(os.path.join(output_dir, "token_attributions_distribution.png"), dpi=300)
     plt.close()
