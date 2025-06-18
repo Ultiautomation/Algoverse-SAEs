@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 sae_refusal_latents.py
 ======================
