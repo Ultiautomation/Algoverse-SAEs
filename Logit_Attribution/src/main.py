@@ -105,7 +105,9 @@ def main():
     # Load tokenizer once
     tokenizer = get_tokenizer(base_model_name)
 
-    # # Settings to intitiate IG
+    # Uncomment the below code block to run IG for final output
+    --------------------------------------------------------------
+    # # Settings to intitiate IG 
     # SAVE_EVERY = 10
     # INTERMEDIATE_SAVE_PATH = "outputs/ig_partial_results.pkl"
 
@@ -163,7 +165,7 @@ def main():
     # #Analyse
     # ig_results_df = pd.read_pickle("ig_full_results.pkl")
     # analyse_ig_results(ig_results_df)
-
+    -------------------------------------------------------------------------------------------
 
     #layerwise Run_IG
     # Settings
@@ -270,7 +272,8 @@ def main():
     sampled_df.to_csv(DATAFRAME_SAVE_PATH, index=False)
     print("✅ All results and DataFrame saved.")
 
-    
+    ----------------------------------------------------------------------------------------
+    # First code for layerwise IG function  - refer intergrated_gradients.py for the function
     # ## RUN IG LAYERWISE
     # # Settings for layerwise IG
     # SAVE_EVERY = 10
