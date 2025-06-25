@@ -1,0 +1,17 @@
+{
+    "18": {
+      "feature": 76,
+      "score": 0.7035496830940247,
+      "base": 0.94,
+      "alpha_5.0_up": 0.94,
+      "alpha_5.0_down": 0.94,
+      "alpha_10.0_up": 0.94,
+      "alpha_10.0_down": 0.94,
+      "alpha_20.0_up": 0.92,
+      "alpha_20.0_down": 0.92,
+      "alpha_50.0_up": 0.94,
+      "alpha_50.0_down": 0.92
+    }
+  }
+
+
