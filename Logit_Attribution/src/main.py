@@ -1,6 +1,6 @@
 from data_loader import load_sampled_dataframe
 from model_loader import get_tokenizer, load_model, unload_model
-from intergrated_gradients import run_ig, get_baseline
+from intergrated_gradients import run_ig, get_baseline, target_layer_getter, run_layerwise_conductance
 from visualize import plot_toxicity_score, analyse_ig_results, find_most_common_refusal_term
 from extract_data import extract_refusal_phrases
 from config import load_dotenv
