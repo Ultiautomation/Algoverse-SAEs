@@ -1,4 +1,5 @@
 from captum.attr import IntegratedGradients
+from captum.attr import LayerConductance
 import torch
 import pandas as pd
 import time
@@ -27,7 +28,16 @@ def get_baseline(input_ids, model, tokenizer, strategy="pad"):
 
         else:
             raise ValueError(f"Unknown baseline strategy: {strategy}")
-        
+                
+def target_layer_getter(model, layer_idx):
+    """Get the transformer layer by index for the Gemma 2-2B model."""
+    try:
+        # Adjust based on the Gemma 2-2B architecture.
+        # If layers are stored under `transformer.h`, `blocks`, or similar, access it here.
+        layer = model.transformer.h[layer_idx]  # Example for GPT-like models
+        return layer
+    except AttributeError:
+        raise ValueError(f"Model doesn't have 'transformer.h' attribute. Please verify the model architecture.")        
 
 #  """
 #     Run Integrated Gradients on a prompt for a list of refusal terms.
@@ -209,3 +219,88 @@ def run_layerwise_ig(prompt, model, tokenizer, refusal_terms, baseline_strategy=
         "layerwise": layerwise_attributions,
         "aggregate": aggregate_token_scores_readable
     }
+
+def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_strategy="pad", n_steps=20):
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    print(f"prompt: {prompt}, refusal_terms: {refusal_terms}, baseline_strategy: {baseline_strategy}, n_steps: {n_steps}")
+    
+    inputs = tokenizer(prompt, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(device)
+    attention_mask = inputs["attention_mask"].to(device)
+
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
+    layerwise_attributions = {}
+    aggregate_token_scores = {}
+
+    for layer_idx in range(len(model.model.layers)):  
+        layer = target_layer_getter(model, layer_idx)
+
+        embeddings = model.get_input_embeddings()(input_ids).detach().requires_grad_(True)
+        baseline = get_baseline(input_ids, model, tokenizer, strategy=baseline_strategy).to(device)
+
+        layer_token_attrs = {}
+
+        for phrase in refusal_terms:
+            phrase = phrase.strip()
+            if not phrase:
+                continue
+
+            target_tokens = tokenizer.tokenize(phrase)
+            token_ids = tokenizer.convert_tokens_to_ids(target_tokens)
+
+            if len(token_ids) == 0:
+                print(f"Skipping unknown phrase: {phrase}")
+                continue
+
+            for token_id in token_ids:
+                token_str = tokenizer.convert_ids_to_tokens([token_id])[0]
+
+                def wrapped_forward(embeds):
+                    outputs = model(inputs_embeds=embeds, attention_mask=attention_mask)
+                    return outputs.logits[:, :, token_id].sum(dim=1)  # shape: (batch_size,)
+
+                lc = LayerConductance(wrapped_forward, layer)
+
+                try:
+                    attributions, _ = lc.attribute(
+                        inputs=embeddings,
+                        baselines=baseline,
+                        n_steps=n_steps,
+                        target=None,
+                        additional_forward_args=None,
+                        return_convergence_delta=True,
+                        attribute_to_layer_input=False
+                    )
+
+                    attributions = attributions.detach().cpu()
+                    layer_token_attrs[token_str] = attributions
+
+                    token_score = attributions.sum(dim=-1).squeeze(0)
+                    if token_str not in aggregate_token_scores:
+                        aggregate_token_scores[token_str] = torch.zeros_like(token_score)
+                    aggregate_token_scores[token_str] += token_score
+
+                except Exception as e:
+                    print(f"Layer {layer_idx} - Token '{token_str}' conductance failed: {e}")
+
+        token_scores_dict = {
+            token_str: list(zip(tokens, attr_tensor.sum(dim=-1).squeeze(0).tolist()))
+            for token_str, attr_tensor in layer_token_attrs.items()
+        }
+
+        layerwise_attributions[f"layer_{layer_idx}"] = token_scores_dict
+
+    aggregate_token_scores_readable = {
+        token_str: list(zip(tokens, score.tolist()))
+        for token_str, score in aggregate_token_scores.items()
+    }
+
+    return {
+        "layerwise": layerwise_attributions,
+        "aggregate": aggregate_token_scores_readable
+    }
+
