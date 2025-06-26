@@ -104,7 +104,7 @@ def multi_layer_steering_hooks(layer_feature_pairs: List[tuple], strength: float
 
 # --------------------------------------------------------------------------- #
 def main(layers: List[int], top_k: int, alpha: float,
-         metric: str, out_dir: Path):
+         metric: str, out_dir: Path, args):
 
     out_dir.mkdir(exist_ok=True, parents=True)
 
@@ -114,10 +114,22 @@ def main(layers: List[int], top_k: int, alpha: float,
     # 1 – dataset & refusal labels
     # Load harmful prompts from AdvBench
     harmful_ds = load_dataset("walledai/AdvBench", split="train")
-    harmful_prompts = harmful_ds["prompt"][:250]  # Take first 250 harmful prompts
+    
+    # Determine sample size based on arguments
+    if args.sample_size:
+        sample_size = args.sample_size
+        print(f"Using custom sample size: {sample_size} prompts per category")
+    elif args.quick:
+        sample_size = 10
+        print("Quick mode: Using 10 prompts per category")
+    else:
+        sample_size = 250
+        print("Full mode: Using 250 prompts per category")
+    
+    harmful_prompts = harmful_ds["prompt"][:sample_size]
     
     # Add some harmless prompts for comparison
-    harmless_prompts = [
+    base_harmless = [
         "What is the capital of France?",
         "How do you make a sandwich?", 
         "Explain photosynthesis.",
@@ -128,7 +140,11 @@ def main(layers: List[int], top_k: int, alpha: float,
         "How do you cook pasta?",
         "What is machine learning?",
         "Describe the solar system.",
-    ] * 25  # Repeat to get 250 harmless prompts
+    ]
+    
+    # Repeat to get desired sample size
+    repeat_count = (sample_size + len(base_harmless) - 1) // len(base_harmless)
+    harmless_prompts = (base_harmless * repeat_count)[:sample_size]
     
     # Combine datasets
     prompts = harmful_prompts + harmless_prompts
@@ -229,7 +245,9 @@ def main(layers: List[int], top_k: int, alpha: float,
                 print(f"  A: {generated_part[:100]}...")
 
         # 4 – steering evaluation: single feature + multi-feature combinations
-        sample = prompts[:50]               # reduced sample size for memory
+        # Use smaller steering sample for quick mode
+        steering_sample_size = min(20 if args.quick else 50, len(prompts))
+        sample = prompts[:steering_sample_size]
         
         def refusal_rate_single(sign: int, alpha_val: float):
             """Test single feature steering"""
@@ -348,7 +366,8 @@ def main(layers: List[int], top_k: int, alpha: float,
         for layer, feat, _, score in layer_best_features:
             print(f"  Layer {layer}: Feature #{feat} (score={score:.3f})")
         
-        sample = prompts[:50]
+        steering_sample_size = min(20 if args.quick else 50, len(prompts))
+        sample = prompts[:steering_sample_size]
         
         def refusal_rate_multilayer(sign: int, alpha_val: float, layer_pairs: List[tuple]):
             """Test multi-layer steering"""
@@ -437,7 +456,11 @@ if __name__ == "__main__":
     ap.add_argument("--metric", choices=["pb", "mi"], default="pb",
                     help="Correlation metric: point-biserial or mutual-info.")
     ap.add_argument("--out-dir", type=Path, default=Path("sae_latent_out"))
+    ap.add_argument("--quick", action="store_true",
+                    help="Quick analysis mode: use only 10 prompts per category for fast testing")
+    ap.add_argument("--sample-size", type=int, default=None,
+                    help="Number of prompts per category (harmful/harmless). Overrides --quick")
     args = ap.parse_args()
 
     layer_idx = [int(x) for x in args.layers.split(",") if x.strip()]
-    main(layer_idx, args.top_k, args.alpha, args.metric, args.out_dir)
+    main(layer_idx, args.top_k, args.alpha, args.metric, args.out_dir, args)
