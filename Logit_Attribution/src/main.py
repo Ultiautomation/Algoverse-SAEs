@@ -341,6 +341,72 @@ def main():
     # layerwise_df.to_pickle(FINAL_SAVE_PATH)
     # print(f"\n✅ Layerwise IG completed. Results saved to {FINAL_SAVE_PATH}")
 
+    ## RUN LAYERWISE CONSDUCTANCE
+    # Settings for layerwise conductance
+    SAVE_EVERY = 10
+    LAYERWISE_SAVE_PATH = "outputs/layerwise_cond_partial_results.pkl"
+    FINAL_SAVE_PATH = "outputs/layerwise_cond_full_results.pkl"
+
+    # Restore partial results
+    layerwise_cond_records = []
+    start_index = 0
+    if os.path.exists(LAYERWISE_COND_SAVE_PATH):
+        with open(LAYERWISE_COND_SAVE_PATH, "rb") as f:
+            layerwise_cond_records = pickle.load(f)
+        start_index = len(layerwise_cond_records)
+        print(f"Resuming layerwise IG from index {start_index}")
+
+    # Run layerwise conductance 
+    for i, (_, row) in enumerate(sampled_df.iloc[start_index:].iterrows(), start=start_index):
+        prompt = row['Prompt']
+        print(f"\n[Prompt {i}] {prompt}")
+
+        refusal_terms = row.get("Refusal_outputs", "").split("; ")
+        refusal_terms = [term.strip() for term in refusal_terms if term.strip()]
+
+        if not refusal_terms:
+            print("No refusal terms found; skipping.")
+            continue
+
+        try:
+            start_time = time.time()
+            instruct_model = load_model(tuned_model_name)
+            print("Tuned model loaded.")
+
+            layerwise_cond_result = run_layerwise_conductance(
+                prompt,
+                instruct_model,
+                tokenizer,
+                refusal_terms,
+                baseline_strategy="pad",
+                n_steps=20
+            )
+
+            unload_model(instruct_model)
+            print("Tuned model unloaded from memory.")
+            elapsed = time.time() - start_time
+
+            layerwise_cond_records.append({
+                'Prompt': prompt,
+                'Prompt_toxicity': row['Prompt_toxicity'],
+                'Instruct_Response': row['Instruct_Model_Response'],
+                'Layerwise_Conductance': layerwise_cond_result,
+                'Time_Taken': elapsed
+            })
+
+            if (i + 1) % SAVE_EVERY == 0:
+                with open(LAYERWISE_SAVE_PATH, "wb") as f:
+                    pickle.dump(layerwise_cond_records, f)
+                print(f"✅ Layerwise Conductance saved progress at prompt {i + 1}")
+
+        except Exception as e:
+            print(f"❌ Error on prompt {i}: {e}")
+            continue
+
+    # Final save
+    layerwise_cond_df = pd.DataFrame(layerwise_cond_records)
+    layerwise_cond_df.to_pickle(FINAL_SAVE_PATH)
+    print(f"\n✅ Layerwise conductance completed. Results saved to {FINAL_SAVE_PATH}")
 
 if __name__ == "__main__":
     main()
