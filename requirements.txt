@@ -1,0 +1,8 @@
+torch
+datasets
+sae-lens
+scikit-learn
+tqdm
+transformers
+accelerate
+huggingface-hub
