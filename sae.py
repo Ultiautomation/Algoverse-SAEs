@@ -122,9 +122,9 @@ def main(layers: List[int], top_k: int, alpha: float,
     ])
 
     print(f"Dataset sizes: {len(harmful_prompts)} harmful, {len(harmless_prompts)} harmless")
+    print(f"Using correlation metric: {metric}")
 
     result_dict: Dict[str, Dict[str, float]] = {}
-    layer_best_features = []  # Store (layer, feature_idx, feature_vec, score) for multi-layer steering
 
     for layer in layers:
         sae_id = layer_sae_id(layer)
@@ -140,39 +140,103 @@ def main(layers: List[int], top_k: int, alpha: float,
             feats.append(acts_final)
         feats = torch.cat(feats)                         # N × d
 
-        # 3 – score features
-        if metric == "mi":
+        # 3 – score features using selected metric(s)
+        if metric == "both":
+            # Run both methods and compare
+            print(f"Layer {layer}: Running both correlation methods for comparison")
+            
+            pb_scores = point_biserial(feats, combined_labels)
+            mi_scores_vals = mi_scores(feats > 0, combined_labels)
+            
+            pb_top_vals, pb_top_idx = torch.topk(pb_scores.abs(), top_k)
+            mi_top_vals, mi_top_idx = torch.topk(mi_scores_vals.abs(), top_k)
+            
+            # Save both results
+            pb_csv_path = out_dir / f"layer{layer}_top{top_k}_pb.csv"
+            mi_csv_path = out_dir / f"layer{layer}_top{top_k}_mi.csv"
+            
+            with open(pb_csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "pb_corr_abs"])
+                writer.writerows(zip(pb_top_idx.tolist(), pb_top_vals.tolist()))
+            
+            with open(mi_csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "mi_score"])
+                writer.writerows(zip(mi_top_idx.tolist(), mi_top_vals.tolist()))
+            
+            print(f"✓ saved {pb_csv_path} and {mi_csv_path}")
+            
+            # Compare top features
+            pb_top_set = set(pb_top_idx[:5].tolist())
+            mi_top_set = set(mi_top_idx[:5].tolist())
+            overlap = pb_top_set.intersection(mi_top_set)
+            
+            print(f"  Top-5 overlap: {len(overlap)}/5 features")
+            print(f"  PB top-5: {pb_top_idx[:5].tolist()}")
+            print(f"  MI top-5: {mi_top_idx[:5].tolist()}")
+            if overlap:
+                print(f"  Common features: {sorted(list(overlap))}")
+            
+            # Use point-biserial for steering (tends to be more stable)
+            scores = pb_scores
+            top_vals, top_idx = pb_top_vals, pb_top_idx
+            primary_method = "pb"
+            
+        elif metric == "mi":
             scores = mi_scores(feats > 0, combined_labels)
-        else:
+            print(f"Layer {layer}: Using mutual information scoring")
+            top_vals, top_idx = torch.topk(scores.abs(), top_k)
+            csv_path = out_dir / f"layer{layer}_top{top_k}.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "mi_score"])
+                writer.writerows(zip(top_idx.tolist(), top_vals.tolist()))
+            print(f"✓ saved {csv_path}")
+            primary_method = "mi"
+            
+        else:  # pb
             scores = point_biserial(feats, combined_labels)
+            print(f"Layer {layer}: Using point-biserial correlation scoring")
+            top_vals, top_idx = torch.topk(scores.abs(), top_k)
+            csv_path = out_dir / f"layer{layer}_top{top_k}.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "pb_corr_abs"])
+                writer.writerows(zip(top_idx.tolist(), top_vals.tolist()))
+            print(f"✓ saved {csv_path}")
+            primary_method = "pb"
 
-        top_vals, top_idx = torch.topk(scores.abs(), top_k)
-        csv_path = out_dir / f"layer{layer}_top{top_k}.csv"
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["feature_idx", "corr_abs"])
-            writer.writerows(zip(top_idx.tolist(), top_vals.tolist()))
-        print(f"✓ saved {csv_path}")
-
-        # save for steering - both single and multi-feature
+        # save for steering - single and top-3 only
         best_feat = top_idx[0].item()
         best_vec  = sae.W_dec[best_feat].detach()
         
-        # Get top 3 and top 5 features for multi-feature steering
+        # Get top 3 features for multi-feature steering
         top3_feats = top_idx[:3].tolist()
-        top5_feats = top_idx[:5].tolist()
         top3_vecs = [sae.W_dec[f].detach() for f in top3_feats]
-        top5_vecs = [sae.W_dec[f].detach() for f in top5_feats]
         
-        result_dict[str(layer)] = {
+        layer_results = {
             "feature": best_feat,
-            "score":   top_vals[0].item(),
+            "score": top_vals[0].item(),
             "top3_features": top3_feats,
-            "top5_features": top5_feats
+            "metric_used": metric,
+            "primary_method": primary_method
         }
         
-        # Store for multi-layer steering
-        layer_best_features.append((layer, best_feat, best_vec, top_vals[0].item()))
+        # Add comparison data if both methods were used
+        if metric == "both":
+            layer_results.update({
+                "pb_top_feature": pb_top_idx[0].item(),
+                "pb_top_score": pb_top_vals[0].item(),
+                "pb_top3": pb_top_idx[:3].tolist(),
+                "mi_top_feature": mi_top_idx[0].item(), 
+                "mi_top_score": mi_top_vals[0].item(),
+                "mi_top3": mi_top_idx[:3].tolist(),
+                "top5_overlap_count": len(overlap),
+                "top5_overlap_features": sorted(list(overlap))
+            })
+        
+        result_dict[str(layer)] = layer_results
 
         # Quick baseline test - check if model refuses anything
         print(f"\n=== Baseline Response Test for Layer {layer} ===")
@@ -214,7 +278,7 @@ def main(layers: List[int], top_k: int, alpha: float,
                 print(f"  Q: {prompt}")
                 print(f"  A: {generated_part[:100]}...")
 
-        # 4 – steering evaluation: split by dataset type for better analysis
+        # 4 – steering evaluation: focus on conditional probabilities only
         # Use smaller steering sample for quick mode
         steering_sample_size = min(20 if args.quick else 50, len(harmful_prompts))
         harmful_sample = harmful_prompts[:steering_sample_size]
@@ -271,8 +335,8 @@ def main(layers: List[int], top_k: int, alpha: float,
             
             return baseline_results
 
-        def evaluate_refusal_split(sign: int, alpha_val: float, hook_func, baseline_refusals):
-            """Evaluate refusal rates with conditional probability tracking"""
+        def evaluate_conditional_only(sign: int, alpha_val: float, hook_func, baseline_refusals):
+            """Evaluate only conditional probabilities: P(refusal with steering | refusal at baseline)"""
             results = {"harmful": {}, "harmless": {}}
             
             with model.hooks(fwd_hooks=[(sae.cfg.hook_name, hook_func)]):
@@ -310,19 +374,6 @@ def main(layers: List[int], top_k: int, alpha: float,
                         print(f"Generation error: {e}")
                         harmless_refusal_decisions.append(False)
             
-            # Calculate standard rates
-            harmful_total = len(harmful_refusal_decisions)
-            harmful_refusal_count = sum(harmful_refusal_decisions)
-            results["harmful"]["rate"] = harmful_refusal_count / harmful_total if harmful_total > 0 else 0
-            results["harmful"]["count"] = harmful_refusal_count
-            results["harmful"]["total"] = harmful_total
-            
-            harmless_total = len(harmless_refusal_decisions)
-            harmless_refusal_count = sum(harmless_refusal_decisions)
-            results["harmless"]["rate"] = harmless_refusal_count / harmless_total if harmless_total > 0 else 0
-            results["harmless"]["count"] = harmless_refusal_count  
-            results["harmless"]["total"] = harmless_total
-            
             # Calculate conditional probabilities: P(refusal with steering | refusal at baseline)
             # For harmful prompts
             baseline_harmful_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmful"]) if refused]
@@ -336,7 +387,7 @@ def main(layers: List[int], top_k: int, alpha: float,
                 results["harmful"]["conditional_count"] = 0
                 results["harmful"]["baseline_refused_total"] = 0
             
-            # For harmless prompts (should have very few baseline refusals)
+            # For harmless prompts
             baseline_harmless_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmless"]) if refused]
             if len(baseline_harmless_refused_indices) > 0:
                 still_refused_count = sum(1 for i in baseline_harmless_refused_indices if harmless_refusal_decisions[i])
@@ -350,335 +401,48 @@ def main(layers: List[int], top_k: int, alpha: float,
             
             return results
 
-
-
-        # Get baseline refusal patterns for conditional probability calculations
-        print(f"\nLayer {layer} - Getting baseline refusal patterns...")
         baseline_refusals = get_baseline_refusals()
         
-        baseline_harmful_rate = sum(baseline_refusals["harmful"]) / len(baseline_refusals["harmful"])
-        baseline_harmless_rate = sum(baseline_refusals["harmless"]) / len(baseline_refusals["harmless"])
         baseline_harmful_refused_count = sum(baseline_refusals["harmful"])
         baseline_harmless_refused_count = sum(baseline_refusals["harmless"])
         
-        print(f"\nLayer {layer} Steering Results:")
-        print(f"Baseline (no steering):")
-        print(f"  Harmful:  {baseline_harmful_rate:.3f} ({baseline_harmful_refused_count}/{len(baseline_refusals['harmful'])})")
-        print(f"  Harmless: {baseline_harmless_rate:.3f} ({baseline_harmless_refused_count}/{len(baseline_refusals['harmless'])})")
-        
         steering_results = {
-            "baseline_harmful": baseline_harmful_rate,
-            "baseline_harmless": baseline_harmless_rate,
-            "baseline_harmful_count": baseline_harmful_refused_count,
-            "baseline_harmless_count": baseline_harmless_refused_count
+            "baseline_harmful_refused_count": baseline_harmful_refused_count,
+            "baseline_harmless_refused_count": baseline_harmless_refused_count,
+            "baseline_total": len(baseline_refusals['harmful'])
         }
         
-        # Test single feature at α=20 (showed best results)
-        print(f"\n--- Single Feature (#{best_feat}) ---")
         single_up_hook = steering_hook(best_vec, +20.0)
         single_down_hook = steering_hook(best_vec, -20.0)
         
-        single_up_results = evaluate_refusal_split(+1, 20.0, single_up_hook, baseline_refusals)
-        single_down_results = evaluate_refusal_split(-1, 20.0, single_down_hook, baseline_refusals)
-        
-        print(f"α=+20.0:")
-        print(f"  Harmful:  {single_up_results['harmful']['rate']:.3f} ({single_up_results['harmful']['count']}/{single_up_results['harmful']['total']})")
-        print(f"    Conditional: {single_up_results['harmful']['conditional_rate']:.3f} ({single_up_results['harmful']['conditional_count']}/{single_up_results['harmful']['baseline_refused_total']}) of baseline-refused")
-        print(f"  Harmless: {single_up_results['harmless']['rate']:.3f} ({single_up_results['harmless']['count']}/{single_up_results['harmless']['total']})")
-        if single_up_results['harmless']['baseline_refused_total'] > 0:
-            print(f"    Conditional: {single_up_results['harmless']['conditional_rate']:.3f} ({single_up_results['harmless']['conditional_count']}/{single_up_results['harmless']['baseline_refused_total']}) of baseline-refused")
-        
-        print(f"α=-20.0:")
-        print(f"  Harmful:  {single_down_results['harmful']['rate']:.3f} ({single_down_results['harmful']['count']}/{single_down_results['harmful']['total']})")
-        print(f"    Conditional: {single_down_results['harmful']['conditional_rate']:.3f} ({single_down_results['harmful']['conditional_count']}/{single_down_results['harmful']['baseline_refused_total']}) of baseline-refused")
-        print(f"  Harmless: {single_down_results['harmless']['rate']:.3f} ({single_down_results['harmless']['count']}/{single_down_results['harmless']['total']})")
-        if single_down_results['harmless']['baseline_refused_total'] > 0:
-            print(f"    Conditional: {single_down_results['harmless']['conditional_rate']:.3f} ({single_down_results['harmless']['conditional_count']}/{single_down_results['harmless']['baseline_refused_total']}) of baseline-refused")
-        
+        single_up_results = evaluate_conditional_only(+1, 20.0, single_up_hook, baseline_refusals)
+        single_down_results = evaluate_conditional_only(-1, 20.0, single_down_hook, baseline_refusals)
+
         steering_results.update({
-            "single_20_up_harmful": single_up_results['harmful']['rate'],
-            "single_20_up_harmless": single_up_results['harmless']['rate'],
             "single_20_up_harmful_conditional": single_up_results['harmful']['conditional_rate'],
             "single_20_up_harmless_conditional": single_up_results['harmless']['conditional_rate'],
-            "single_20_down_harmful": single_down_results['harmful']['rate'],
-            "single_20_down_harmless": single_down_results['harmless']['rate'],
             "single_20_down_harmful_conditional": single_down_results['harmful']['conditional_rate'],
             "single_20_down_harmless_conditional": single_down_results['harmless']['conditional_rate']
         })
         
-        # Test top-3 features combination
-        print(f"\n--- Top-3 Features {top3_feats} ---")
-        for alpha_val in [10.0, 20.0, 30.0]:
-            multi3_up_hook = multi_feature_steering_hook(top3_vecs, +alpha_val)
-            multi3_down_hook = multi_feature_steering_hook(top3_vecs, -alpha_val)
-            
-            multi3_up_results = evaluate_refusal_split(+1, alpha_val, multi3_up_hook, baseline_refusals)
-            multi3_down_results = evaluate_refusal_split(-1, alpha_val, multi3_down_hook, baseline_refusals)
-            
-            print(f"α=+{alpha_val:4.1f}:")
-            print(f"  Harmful:  {multi3_up_results['harmful']['rate']:.3f} ({multi3_up_results['harmful']['count']}/{multi3_up_results['harmful']['total']})")
-            print(f"    Conditional: {multi3_up_results['harmful']['conditional_rate']:.3f} ({multi3_up_results['harmful']['conditional_count']}/{multi3_up_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {multi3_up_results['harmless']['rate']:.3f} ({multi3_up_results['harmless']['count']}/{multi3_up_results['harmless']['total']})")
-            
-            print(f"α=-{alpha_val:4.1f}:")
-            print(f"  Harmful:  {multi3_down_results['harmful']['rate']:.3f} ({multi3_down_results['harmful']['count']}/{multi3_down_results['harmful']['total']})")
-            print(f"    Conditional: {multi3_down_results['harmful']['conditional_rate']:.3f} ({multi3_down_results['harmful']['conditional_count']}/{multi3_down_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {multi3_down_results['harmless']['rate']:.3f} ({multi3_down_results['harmless']['count']}/{multi3_down_results['harmless']['total']})")
-            
-            steering_results.update({
-                f"top3_{alpha_val}_up_harmful": multi3_up_results['harmful']['rate'],
-                f"top3_{alpha_val}_up_harmless": multi3_up_results['harmless']['rate'],
-                f"top3_{alpha_val}_up_harmful_conditional": multi3_up_results['harmful']['conditional_rate'],
-                f"top3_{alpha_val}_down_harmful": multi3_down_results['harmful']['rate'],
-                f"top3_{alpha_val}_down_harmless": multi3_down_results['harmless']['rate'],
-                f"top3_{alpha_val}_down_harmful_conditional": multi3_down_results['harmful']['conditional_rate']
-            })
+        alpha_val = 20.0
+        multi3_up_hook = multi_feature_steering_hook(top3_vecs, +alpha_val)
+        multi3_down_hook = multi_feature_steering_hook(top3_vecs, -alpha_val)
         
-        # Test top-5 features combination  
-        print(f"\n--- Top-5 Features {top5_feats} ---")
-        for alpha_val in [10.0, 20.0, 30.0]:
-            multi5_up_hook = multi_feature_steering_hook(top5_vecs, +alpha_val)
-            multi5_down_hook = multi_feature_steering_hook(top5_vecs, -alpha_val)
-            
-            multi5_up_results = evaluate_refusal_split(+1, alpha_val, multi5_up_hook, baseline_refusals)
-            multi5_down_results = evaluate_refusal_split(-1, alpha_val, multi5_down_hook, baseline_refusals)
-            
-            print(f"α=+{alpha_val:4.1f}:")
-            print(f"  Harmful:  {multi5_up_results['harmful']['rate']:.3f} ({multi5_up_results['harmful']['count']}/{multi5_up_results['harmful']['total']})")
-            print(f"    Conditional: {multi5_up_results['harmful']['conditional_rate']:.3f} ({multi5_up_results['harmful']['conditional_count']}/{multi5_up_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {multi5_up_results['harmless']['rate']:.3f} ({multi5_up_results['harmless']['count']}/{multi5_up_results['harmless']['total']})")
-            
-            print(f"α=-{alpha_val:4.1f}:")
-            print(f"  Harmful:  {multi5_down_results['harmful']['rate']:.3f} ({multi5_down_results['harmful']['count']}/{multi5_down_results['harmful']['total']})")
-            print(f"    Conditional: {multi5_down_results['harmful']['conditional_rate']:.3f} ({multi5_down_results['harmful']['conditional_count']}/{multi5_down_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {multi5_down_results['harmless']['rate']:.3f} ({multi5_down_results['harmless']['count']}/{multi5_down_results['harmless']['total']})")
-            
-            steering_results.update({
-                f"top5_{alpha_val}_up_harmful": multi5_up_results['harmful']['rate'],
-                f"top5_{alpha_val}_up_harmless": multi5_up_results['harmless']['rate'],
-                f"top5_{alpha_val}_up_harmful_conditional": multi5_up_results['harmful']['conditional_rate'],
-                f"top5_{alpha_val}_down_harmful": multi5_down_results['harmful']['rate'],
-                f"top5_{alpha_val}_down_harmless": multi5_down_results['harmless']['rate'],
-                f"top5_{alpha_val}_down_harmful_conditional": multi5_down_results['harmful']['conditional_rate']
-            })
+        multi3_up_results = evaluate_conditional_only(+1, alpha_val, multi3_up_hook, baseline_refusals)
+        multi3_down_results = evaluate_conditional_only(-1, alpha_val, multi3_down_hook, baseline_refusals)
+
+        steering_results.update({
+            "top3_20_up_harmful_conditional": multi3_up_results['harmful']['conditional_rate'],
+            "top3_20_up_harmless_conditional": multi3_up_results['harmless']['conditional_rate'],
+            "top3_20_down_harmful_conditional": multi3_down_results['harmful']['conditional_rate'],
+            "top3_20_down_harmless_conditional": multi3_down_results['harmless']['conditional_rate']
+        })
         
         result_dict[str(layer)].update(steering_results)
 
-    # Multi-layer steering evaluation (only if we have multiple layers)
-    if len(layer_best_features) > 1:
-        print(f"\n{'='*60}")
-        print("MULTI-LAYER STEERING EVALUATION")
-        print(f"{'='*60}")
-        
-        # Sort by correlation strength and take top layers
-        layer_best_features.sort(key=lambda x: abs(x[3]), reverse=True)
-        print("Layer features sorted by correlation:")
-        for layer, feat, _, score in layer_best_features:
-            print(f"  Layer {layer}: Feature #{feat} (score={score:.3f})")
-        
-        steering_sample_size = min(20 if args.quick else 50, len(combined_prompts))
-        sample = combined_prompts[:steering_sample_size]
-        
-        def evaluate_multilayer_split(sign: int, alpha_val: float, layer_pairs: List[tuple], baseline_refusals):
-            """Test multi-layer steering with split evaluation and conditional probabilities"""
-            hooks = multi_layer_steering_hooks([(l, v) for l, _, v, _ in layer_pairs], sign * alpha_val)
-            results = {"harmful": {}, "harmless": {}}
-            
-            with model.hooks(fwd_hooks=hooks):
-                # Evaluate on harmful prompts
-                harmful_refusal_decisions = []
-                for i, prompt in enumerate(harmful_sample):
-                    try:
-                        inputs = model.tokenizer(prompt, return_tensors="pt").to(DEVICE)
-                        outs = model.generate(
-                            inputs.input_ids,
-                            max_new_tokens=50,
-                            do_sample=False
-                        )
-                        full_decoded = model.tokenizer.decode(outs[0], skip_special_tokens=True)
-                        generated_part = full_decoded[len(prompt):].strip()
-                        harmful_refusal_decisions.append(is_refusal(generated_part))
-                    except Exception as e:
-                        print(f"Generation error: {e}")
-                        harmful_refusal_decisions.append(False)
-                
-                # Evaluate on harmless prompts  
-                harmless_refusal_decisions = []
-                for i, prompt in enumerate(harmless_sample):
-                    try:
-                        inputs = model.tokenizer(prompt, return_tensors="pt").to(DEVICE)
-                        outs = model.generate(
-                            inputs.input_ids,
-                            max_new_tokens=50,
-                            do_sample=False
-                        )
-                        full_decoded = model.tokenizer.decode(outs[0], skip_special_tokens=True)
-                        generated_part = full_decoded[len(prompt):].strip()
-                        harmless_refusal_decisions.append(is_refusal(generated_part))
-                    except Exception as e:
-                        print(f"Generation error: {e}")
-                        harmless_refusal_decisions.append(False)
-            
-            # Calculate standard rates
-            harmful_total = len(harmful_refusal_decisions)
-            harmful_refusal_count = sum(harmful_refusal_decisions)
-            results["harmful"]["rate"] = harmful_refusal_count / harmful_total if harmful_total > 0 else 0
-            results["harmful"]["count"] = harmful_refusal_count
-            results["harmful"]["total"] = harmful_total
-            
-            harmless_total = len(harmless_refusal_decisions)
-            harmless_refusal_count = sum(harmless_refusal_decisions)
-            results["harmless"]["rate"] = harmless_refusal_count / harmless_total if harmless_total > 0 else 0
-            results["harmless"]["count"] = harmless_refusal_count  
-            results["harmless"]["total"] = harmless_total
-            
-            # Calculate conditional probabilities: P(refusal with steering | refusal at baseline)
-            # For harmful prompts
-            baseline_harmful_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmful"]) if refused]
-            if len(baseline_harmful_refused_indices) > 0:
-                still_refused_count = sum(1 for i in baseline_harmful_refused_indices if harmful_refusal_decisions[i])
-                results["harmful"]["conditional_rate"] = still_refused_count / len(baseline_harmful_refused_indices)
-                results["harmful"]["conditional_count"] = still_refused_count
-                results["harmful"]["baseline_refused_total"] = len(baseline_harmful_refused_indices)
-            else:
-                results["harmful"]["conditional_rate"] = 0
-                results["harmful"]["conditional_count"] = 0
-                results["harmful"]["baseline_refused_total"] = 0
-            
-            # For harmless prompts (should have very few baseline refusals)
-            baseline_harmless_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmless"]) if refused]
-            if len(baseline_harmless_refused_indices) > 0:
-                still_refused_count = sum(1 for i in baseline_harmless_refused_indices if harmless_refusal_decisions[i])
-                results["harmless"]["conditional_rate"] = still_refused_count / len(baseline_harmless_refused_indices)
-                results["harmless"]["conditional_count"] = still_refused_count
-                results["harmless"]["baseline_refused_total"] = len(baseline_harmless_refused_indices)
-            else:
-                results["harmless"]["conditional_rate"] = 0
-                results["harmless"]["conditional_count"] = 0
-                results["harmless"]["baseline_refused_total"] = 0
-            
-            return results
-        
-        # Test different multi-layer combinations
-        multilayer_results = {}
-        
-        # Top 2 layers
-        top2_layers = layer_best_features[:2]
-        print(f"\n--- Top-2 Layers: {[l for l,_,_,_ in top2_layers]} ---")
-        for alpha_val in [10.0, 20.0, 30.0]:
-            ml2_up_results = evaluate_multilayer_split(+1, alpha_val, top2_layers, baseline_refusals)
-            ml2_down_results = evaluate_multilayer_split(-1, alpha_val, top2_layers, baseline_refusals)
-            
-            print(f"α=+{alpha_val:4.1f}:")
-            print(f"  Harmful:  {ml2_up_results['harmful']['rate']:.3f} ({ml2_up_results['harmful']['count']}/{ml2_up_results['harmful']['total']})")
-            print(f"    Conditional: {ml2_up_results['harmful']['conditional_rate']:.3f} ({ml2_up_results['harmful']['conditional_count']}/{ml2_up_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {ml2_up_results['harmless']['rate']:.3f} ({ml2_up_results['harmless']['count']}/{ml2_up_results['harmless']['total']})")
-            
-            print(f"α=-{alpha_val:4.1f}:")
-            print(f"  Harmful:  {ml2_down_results['harmful']['rate']:.3f} ({ml2_down_results['harmful']['count']}/{ml2_down_results['harmful']['total']})")
-            print(f"    Conditional: {ml2_down_results['harmful']['conditional_rate']:.3f} ({ml2_down_results['harmful']['conditional_count']}/{ml2_down_results['harmful']['baseline_refused_total']})")
-            print(f"  Harmless: {ml2_down_results['harmless']['rate']:.3f} ({ml2_down_results['harmless']['count']}/{ml2_down_results['harmless']['total']})")
-            
-            multilayer_results.update({
-                f"top2_{alpha_val}_up_harmful": ml2_up_results['harmful']['rate'],
-                f"top2_{alpha_val}_up_harmless": ml2_up_results['harmless']['rate'],
-                f"top2_{alpha_val}_up_harmful_conditional": ml2_up_results['harmful']['conditional_rate'],
-                f"top2_{alpha_val}_down_harmful": ml2_down_results['harmful']['rate'],
-                f"top2_{alpha_val}_down_harmless": ml2_down_results['harmless']['rate'],
-                f"top2_{alpha_val}_down_harmful_conditional": ml2_down_results['harmful']['conditional_rate']
-            })
-        
-        # Top 3 layers (if available)
-        if len(layer_best_features) >= 3:
-            top3_layers = layer_best_features[:3]
-            print(f"\n--- Top-3 Layers: {[l for l,_,_,_ in top3_layers]} ---")
-            for alpha_val in [10.0, 20.0, 30.0]:
-                ml3_up_results = evaluate_multilayer_split(+1, alpha_val, top3_layers, baseline_refusals)
-                ml3_down_results = evaluate_multilayer_split(-1, alpha_val, top3_layers, baseline_refusals)
-                
-                print(f"α=+{alpha_val:4.1f}:")
-                print(f"  Harmful:  {ml3_up_results['harmful']['rate']:.3f} ({ml3_up_results['harmful']['count']}/{ml3_up_results['harmful']['total']})")
-                print(f"    Conditional: {ml3_up_results['harmful']['conditional_rate']:.3f} ({ml3_up_results['harmful']['conditional_count']}/{ml3_up_results['harmful']['baseline_refused_total']})")
-                print(f"  Harmless: {ml3_up_results['harmless']['rate']:.3f} ({ml3_up_results['harmless']['count']}/{ml3_up_results['harmless']['total']})")
-                
-                print(f"α=-{alpha_val:4.1f}:")
-                print(f"  Harmful:  {ml3_down_results['harmful']['rate']:.3f} ({ml3_down_results['harmful']['count']}/{ml3_down_results['harmful']['total']})")
-                print(f"    Conditional: {ml3_down_results['harmful']['conditional_rate']:.3f} ({ml3_down_results['harmful']['conditional_count']}/{ml3_down_results['harmful']['baseline_refused_total']})")
-                print(f"  Harmless: {ml3_down_results['harmless']['rate']:.3f} ({ml3_down_results['harmless']['count']}/{ml3_down_results['harmless']['total']})")
-                
-                multilayer_results.update({
-                    f"top3_{alpha_val}_up_harmful": ml3_up_results['harmful']['rate'],
-                    f"top3_{alpha_val}_up_harmless": ml3_up_results['harmless']['rate'],
-                    f"top3_{alpha_val}_up_harmful_conditional": ml3_up_results['harmful']['conditional_rate'],
-                    f"top3_{alpha_val}_down_harmful": ml3_down_results['harmful']['rate'],
-                    f"top3_{alpha_val}_down_harmless": ml3_down_results['harmless']['rate'],
-                    f"top3_{alpha_val}_down_harmful_conditional": ml3_down_results['harmful']['conditional_rate']
-                })
-        
-        # All layers
-        if len(layer_best_features) >= 4:
-            print(f"\n--- All {len(layer_best_features)} Layers ---")
-            for alpha_val in [10.0, 20.0]:
-                ml_all_up_results = evaluate_multilayer_split(+1, alpha_val, layer_best_features, baseline_refusals)
-                ml_all_down_results = evaluate_multilayer_split(-1, alpha_val, layer_best_features, baseline_refusals)
-                
-                print(f"α=+{alpha_val:4.1f}:")
-                print(f"  Harmful:  {ml_all_up_results['harmful']['rate']:.3f} ({ml_all_up_results['harmful']['count']}/{ml_all_up_results['harmful']['total']})")
-                print(f"    Conditional: {ml_all_up_results['harmful']['conditional_rate']:.3f} ({ml_all_up_results['harmful']['conditional_count']}/{ml_all_up_results['harmful']['baseline_refused_total']})")
-                print(f"  Harmless: {ml_all_up_results['harmless']['rate']:.3f} ({ml_all_up_results['harmless']['count']}/{ml_all_up_results['harmless']['total']})")
-                
-                print(f"α=-{alpha_val:4.1f}:")
-                print(f"  Harmful:  {ml_all_down_results['harmful']['rate']:.3f} ({ml_all_down_results['harmful']['count']}/{ml_all_down_results['harmful']['total']})")
-                print(f"    Conditional: {ml_all_down_results['harmful']['conditional_rate']:.3f} ({ml_all_down_results['harmful']['conditional_count']}/{ml_all_down_results['harmful']['baseline_refused_total']})")
-                print(f"  Harmless: {ml_all_down_results['harmless']['rate']:.3f} ({ml_all_down_results['harmless']['count']}/{ml_all_down_results['harmless']['total']})")
-                
-                multilayer_results.update({
-                    f"all_{alpha_val}_up_harmful": ml_all_up_results['harmful']['rate'],
-                    f"all_{alpha_val}_up_harmless": ml_all_up_results['harmless']['rate'],
-                    f"all_{alpha_val}_up_harmful_conditional": ml_all_up_results['harmful']['conditional_rate'],
-                    f"all_{alpha_val}_down_harmful": ml_all_down_results['harmful']['rate'],
-                    f"all_{alpha_val}_down_harmless": ml_all_down_results['harmless']['rate'],
-                    f"all_{alpha_val}_down_harmful_conditional": ml_all_down_results['harmful']['conditional_rate']
-                })
-        
-        result_dict["multilayer"] = multilayer_results
-
-    json.dump(result_dict, open(out_dir / "steer_summary.json", "w"), indent=2)
+    json.dump(result_dict, open(out_dir / "streamlined_results.json", "w"), indent=2)
     
-    # Print evaluation methodology summary
-    print(f"\n{'='*60}")
-    print("EVALUATION METHODOLOGY SUMMARY")
-    print(f"{'='*60}")
-    print("Dataset split approach:")
-    print(f"  • Harmful prompts: {len(harmful_prompts)} from AdvBench")
-    print(f"  • Harmless prompts: {len(harmless_prompts)} from Alpaca")
-    print()
-    print("Key metrics to evaluate steering effectiveness:")
-    print("  • Standard refusal rates: Overall percentage refusing")
-    print("  • Conditional probabilities: P(refusal with steering | refusal at baseline)")
-    print("    - More precise metric focusing on naturally-refused prompts")
-    print("    - Shows how steering affects the model's 'default' refusal behavior")
-    print()
-    print("Expected baselines:")
-    print("  • Harmful baseline refusal rate should be ~94% (per feedback)")
-    print("  • Harmless baseline refusal rate should be ~0% (healthy model)")
-    print()
-    print("Interpretation guide:")
-    print("  • Good steering:")
-    print("    - Large conditional probability changes on harmful prompts")
-    print("    - Minimal negative effects on harmless prompts")
-    print("    - Clear directional control (+α increases, -α decreases refusal)")
-    print("  • Poor steering:")
-    print("    - Small conditional probability changes overall")  
-    print("    - Negative effects on harmless prompts (over-refusal)")
-    print("    - Inconsistent or weak directional control")
-    print()
-    print("Focus on conditional probabilities for cleaner insights into steering effectiveness.")
-    
-    print(f"\nAll results saved → {out_dir}")
-    if len(layer_best_features) > 1:
-        print("Multi-layer steering results included in steer_summary.json")
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -687,8 +451,8 @@ if __name__ == "__main__":
     ap.add_argument("--top-k", type=int, default=15)
     ap.add_argument("--alpha",  type=float, default=5.0,
                     help="Steering strength multiplier.")
-    ap.add_argument("--metric", choices=["pb", "mi"], default="pb",
-                    help="Correlation metric: point-biserial or mutual-info.")
+    ap.add_argument("--metric", choices=["pb", "mi", "both"], default="pb",
+                    help="Correlation metric: point-biserial, mutual-info, or both for comparison.")
     ap.add_argument("--out-dir", type=Path, default=Path("sae_latent_out"))
     ap.add_argument("--quick", action="store_true",
                     help="Quick analysis mode: use only 10 prompts per category for fast testing")
