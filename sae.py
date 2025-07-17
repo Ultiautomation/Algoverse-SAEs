@@ -76,6 +76,43 @@ def multi_layer_steering_hooks(layer_feature_pairs: List[tuple], strength: float
     return hooks
 
 
+def combined_scores(pb_scores: torch.Tensor, mi_scores: torch.Tensor, 
+                   method: str = "normalized_product") -> torch.Tensor:
+    """
+    Combine point-biserial and mutual information scores using different methods.
+    
+    Args:
+        pb_scores: Point-biserial correlation scores
+        mi_scores: Mutual information scores  
+        method: Combination method ('normalized_product', 'weighted_sum', 'rank_fusion')
+    
+    Returns:
+        Combined scores tensor
+    """
+    if method == "normalized_product":
+        # Normalize both scores to [0,1] and take geometric mean
+        pb_norm = (pb_scores.abs() - pb_scores.abs().min()) / (pb_scores.abs().max() - pb_scores.abs().min() + 1e-8)
+        mi_norm = (mi_scores.abs() - mi_scores.abs().min()) / (mi_scores.abs().max() - mi_scores.abs().min() + 1e-8)
+        return torch.sqrt(pb_norm * mi_norm)
+    
+    elif method == "weighted_sum":
+        # Weighted combination (60% PB, 40% MI based on typical reliability)
+        pb_norm = pb_scores.abs() / (pb_scores.abs().max() + 1e-8)
+        mi_norm = mi_scores.abs() / (mi_scores.abs().max() + 1e-8)
+        return 0.6 * pb_norm + 0.4 * mi_norm
+    
+    elif method == "rank_fusion":
+        # Rank-based fusion - features that rank high in both get higher scores
+        pb_ranks = torch.argsort(torch.argsort(pb_scores.abs(), descending=True))
+        mi_ranks = torch.argsort(torch.argsort(mi_scores.abs(), descending=True))
+        # Lower rank values = higher performance, so invert
+        combined_ranks = pb_ranks + mi_ranks
+        return 1.0 / (combined_ranks.float() + 1)
+    
+    else:
+        raise ValueError(f"Unknown combination method: {method}")
+
+
 # --------------------------------------------------------------------------- #
 def main(layers: List[int], top_k: int, alpha: float,
          metric: str, out_dir: Path, args):
@@ -128,7 +165,8 @@ def main(layers: List[int], top_k: int, alpha: float,
 
     for layer in layers:
         sae_id = layer_sae_id(layer)
-        sae, _, _ = SAE.from_pretrained(SAE_RELEASE, sae_id=sae_id, device=DEVICE)
+        sae = SAE.from_pretrained(release=SAE_RELEASE, sae_id=sae_id, device=DEVICE)
+        hook_name = f'blocks.{layer}.hook_resid_post'
 
         # 2 – collect activations at final position
         feats = []
@@ -136,7 +174,7 @@ def main(layers: List[int], top_k: int, alpha: float,
                       desc=f"Layer {layer} acts"):
             batch = combined_prompts[i:i + BATCH]
             _, cache = model.run_with_cache_with_saes(batch, saes=[sae])
-            acts_final = cache[f"{sae.cfg.hook_name}.hook_sae_output"][:, -1, :]
+            acts_final = cache[f"{hook_name}.hook_sae_output"][:, -1, :]
             feats.append(acts_final)
         feats = torch.cat(feats)                         # N × d
 
@@ -195,6 +233,25 @@ def main(layers: List[int], top_k: int, alpha: float,
             print(f"✓ saved {csv_path}")
             primary_method = "mi"
             
+        elif metric == "combined":
+            print(f"Layer {layer}: Using combined scoring with method {args.combine_method}")
+            
+            pb_scores = point_biserial(feats, combined_labels)
+            mi_scores_vals = mi_scores(feats > 0, combined_labels)
+            
+            combined_vals = combined_scores(pb_scores, mi_scores_vals, method=args.combine_method)
+            top_vals, top_idx = torch.topk(combined_vals.abs(), top_k)
+            
+            csv_path = out_dir / f"layer{layer}_top{top_k}_combined_{args.combine_method}.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "combined_score"])
+                writer.writerows(zip(top_idx.tolist(), top_vals.tolist()))
+            print(f"✓ saved {csv_path}")
+            
+            scores = combined_vals
+            primary_method = "combined"
+        
         else:  # pb
             scores = point_biserial(feats, combined_labels)
             print(f"Layer {layer}: Using point-biserial correlation scoring")
@@ -215,6 +272,7 @@ def main(layers: List[int], top_k: int, alpha: float,
         top3_feats = top_idx[:3].tolist()
         top3_vecs = [sae.W_dec[f].detach() for f in top3_feats]
         
+        # Update layer_results
         layer_results = {
             "feature": best_feat,
             "score": top_vals[0].item(),
@@ -222,7 +280,10 @@ def main(layers: List[int], top_k: int, alpha: float,
             "metric_used": metric,
             "primary_method": primary_method
         }
-        
+
+        if metric == "combined":
+            layer_results["combine_method"] = args.combine_method
+
         # Add comparison data if both methods were used
         if metric == "both":
             layer_results.update({
@@ -279,8 +340,11 @@ def main(layers: List[int], top_k: int, alpha: float,
                 print(f"  A: {generated_part[:100]}...")
 
         # 4 – steering evaluation: focus on conditional probabilities only
-        # Use smaller steering sample for quick mode
-        steering_sample_size = min(20 if args.quick else 50, len(harmful_prompts))
+        # Use smaller steering sample for quick mode, otherwise use full sample
+        if args.quick:
+            steering_sample_size = min(20, len(harmful_prompts))
+        else:
+            steering_sample_size = len(harmful_prompts)  # Use full sample size
         harmful_sample = harmful_prompts[:steering_sample_size]
         harmless_sample = harmless_prompts[:steering_sample_size]
         
@@ -339,7 +403,7 @@ def main(layers: List[int], top_k: int, alpha: float,
             """Evaluate only conditional probabilities: P(refusal with steering | refusal at baseline)"""
             results = {"harmful": {}, "harmless": {}}
             
-            with model.hooks(fwd_hooks=[(sae.cfg.hook_name, hook_func)]):
+            with model.hooks(fwd_hooks=[(hook_name, hook_func)]):
                 # Evaluate on harmful prompts
                 harmful_refusal_decisions = []
                 for i, prompt in enumerate(harmful_sample):
@@ -451,8 +515,10 @@ if __name__ == "__main__":
     ap.add_argument("--top-k", type=int, default=15)
     ap.add_argument("--alpha",  type=float, default=5.0,
                     help="Steering strength multiplier.")
-    ap.add_argument("--metric", choices=["pb", "mi", "both"], default="pb",
-                    help="Correlation metric: point-biserial, mutual-info, or both for comparison.")
+    ap.add_argument("--metric", choices=["pb", "mi", "both", "combined"], default="pb",
+                    help="Correlation metric: point-biserial, mutual-info, both for comparison, or combined.")
+    ap.add_argument("--combine-method", choices=["normalized_product", "weighted_sum", "rank_fusion"], default="normalized_product",
+                    help="Method for combining PB and MI scores when using --metric combined.")
     ap.add_argument("--out-dir", type=Path, default=Path("sae_latent_out"))
     ap.add_argument("--quick", action="store_true",
                     help="Quick analysis mode: use only 10 prompts per category for fast testing")
