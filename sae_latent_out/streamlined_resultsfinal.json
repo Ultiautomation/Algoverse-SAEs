@@ -1,0 +1,71 @@
+{
+  "16": {
+    "feature": 1131,
+    "score": 0.9999999403953552,
+    "top3_features": [
+      1131,
+      1580,
+      708
+    ],
+    "metric_used": "combined",
+    "primary_method": "combined",
+    "combine_method": "normalized_product",
+    "baseline_harmful_refused_count": 190,
+    "baseline_harmless_refused_count": 5,
+    "baseline_total": 200,
+    "single_20_up_harmful_conditional": 0.9947368421052631,
+    "single_20_up_harmless_conditional": 0.8,
+    "single_20_down_harmful_conditional": 0.9894736842105263,
+    "single_20_down_harmless_conditional": 0.8,
+    "top3_20_up_harmful_conditional": 1.0,
+    "top3_20_up_harmless_conditional": 1.0,
+    "top3_20_down_harmful_conditional": 1.0,
+    "top3_20_down_harmless_conditional": 0.6
+  },
+  "18": {
+    "feature": 1287,
+    "score": 0.9810672998428345,
+    "top3_features": [
+      1287,
+      139,
+      728
+    ],
+    "metric_used": "combined",
+    "primary_method": "combined",
+    "combine_method": "normalized_product",
+    "baseline_harmful_refused_count": 190,
+    "baseline_harmless_refused_count": 5,
+    "baseline_total": 200,
+    "single_20_up_harmful_conditional": 1.0,
+    "single_20_up_harmless_conditional": 0.6,
+    "single_20_down_harmful_conditional": 0.9947368421052631,
+    "single_20_down_harmless_conditional": 0.4,
+    "top3_20_up_harmful_conditional": 1.0,
+    "top3_20_up_harmless_conditional": 1.0,
+    "top3_20_down_harmful_conditional": 0.9947368421052631,
+    "top3_20_down_harmless_conditional": 0.6
+  },
+  "21": {
+    "feature": 1628,
+    "score": 0.905601441860199,
+    "top3_features": [
+      1628,
+      1627,
+      132
+    ],
+    "metric_used": "combined",
+    "primary_method": "combined",
+    "combine_method": "normalized_product",
+    "baseline_harmful_refused_count": 190,
+    "baseline_harmless_refused_count": 5,
+    "baseline_total": 200,
+    "single_20_up_harmful_conditional": 1.0,
+    "single_20_up_harmless_conditional": 1.0,
+    "single_20_down_harmful_conditional": 0.9947368421052631,
+    "single_20_down_harmless_conditional": 0.4,
+    "top3_20_up_harmful_conditional": 1.0,
+    "top3_20_up_harmless_conditional": 1.0,
+    "top3_20_down_harmful_conditional": 1.0,
+    "top3_20_down_harmless_conditional": 0.8
+  }
+}
