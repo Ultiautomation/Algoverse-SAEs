@@ -10,6 +10,12 @@ from sae_lens import SAE, HookedSAETransformer
 from sklearn.metrics import mutual_info_score
 from tqdm.auto import tqdm
 
+# Sanity check function
+def compute_projection_magnitude(activations: torch.Tensor, direction: torch.Tensor) -> float:
+    dir_norm = direction / (direction.norm() + 1e-8)
+    proj = (activations @ dir_norm).abs().mean().item()
+    return proj
+
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_NAME  = "google/gemma-2-2b-it"  # Using instruction-tuned model
 SAE_RELEASE = "gemma-scope-2b-pt-res-canonical"
@@ -111,6 +117,25 @@ def combined_scores(pb_scores: torch.Tensor, mi_scores: torch.Tensor,
     
     else:
         raise ValueError(f"Unknown combination method: {method}")
+
+
+def ablation_hook(latent_vec: torch.Tensor):
+    def _hook(x, hook, **kwargs):
+        # Normalize latent_vec to unit vector
+        direction = latent_vec / (latent_vec.norm() + 1e-8)
+        # Project x onto direction: (x · direction) * direction
+        proj = (x @ direction).unsqueeze(1) * direction.unsqueeze(0)
+        # Ablate by subtracting the projection
+        return x - proj
+    return _hook
+
+def multi_ablation_hook(latent_vecs: List[torch.Tensor]):
+    def _hook(x, hook, **kwargs):
+        combined_vec = torch.stack(latent_vecs).mean(0)
+        direction = combined_vec / (combined_vec.norm() + 1e-8)
+        proj = (x @ direction).unsqueeze(1) * direction.unsqueeze(0)
+        return x - proj
+    return _hook
 
 
 # --------------------------------------------------------------------------- #
@@ -297,6 +322,13 @@ def main(layers: List[int], top_k: int, alpha: float,
                 "top5_overlap_features": sorted(list(overlap))
             })
         
+        # Sanity check for best_vec
+        avg_proj = compute_projection_magnitude(feats, best_vec)
+        relative_strength = 20.0 / (avg_proj + 1e-8) if avg_proj > 0 else float('inf')
+        print(f"Layer {layer} sanity: Avg projection onto latent_vec: {avg_proj:.4f}, relative to strength 20: {relative_strength:.2f}x")
+        layer_results["avg_projection"] = avg_proj
+        layer_results["relative_strength"] = relative_strength
+
         result_dict[str(layer)] = layer_results
 
         # Quick baseline test - check if model refuses anything
@@ -399,69 +431,65 @@ def main(layers: List[int], top_k: int, alpha: float,
             
             return baseline_results
 
-        def evaluate_conditional_only(sign: int, alpha_val: float, hook_func, baseline_refusals):
-            """Evaluate only conditional probabilities: P(refusal with steering | refusal at baseline)"""
+        def evaluate_metrics(sign: int, alpha_val: float, hook_func, baseline_refusals):
+            """Evaluate steering metrics"""
             results = {"harmful": {}, "harmless": {}}
             
             with model.hooks(fwd_hooks=[(hook_name, hook_func)]):
-                # Evaluate on harmful prompts
+                # Generate for harmful
                 harmful_refusal_decisions = []
                 for i, prompt in enumerate(harmful_sample):
                     try:
                         inputs = model.tokenizer(prompt, return_tensors="pt").to(DEVICE)
-                        outs = model.generate(
-                            inputs.input_ids,
-                            max_new_tokens=50,
-                            do_sample=False
-                        )
-                        full_decoded = model.tokenizer.decode(outs[0], skip_special_tokens=True)
-                        generated_part = full_decoded[len(prompt):].strip()
-                        harmful_refusal_decisions.append(is_refusal(generated_part))
-                    except Exception as e:
-                        print(f"Generation error: {e}")
+                        outs = model.generate(inputs.input_ids, max_new_tokens=50, do_sample=False)
+                        generated = model.tokenizer.decode(outs[0], skip_special_tokens=True)[len(prompt):].strip()
+                        harmful_refusal_decisions.append(is_refusal(generated))
+                    except:
                         harmful_refusal_decisions.append(False)
                 
-                # Evaluate on harmless prompts  
+                # Generate for harmless
                 harmless_refusal_decisions = []
                 for i, prompt in enumerate(harmless_sample):
                     try:
                         inputs = model.tokenizer(prompt, return_tensors="pt").to(DEVICE)
-                        outs = model.generate(
-                            inputs.input_ids,
-                            max_new_tokens=50,
-                            do_sample=False
-                        )
-                        full_decoded = model.tokenizer.decode(outs[0], skip_special_tokens=True)
-                        generated_part = full_decoded[len(prompt):].strip()
-                        harmless_refusal_decisions.append(is_refusal(generated_part))
-                    except Exception as e:
-                        print(f"Generation error: {e}")
+                        outs = model.generate(inputs.input_ids, max_new_tokens=50, do_sample=False)
+                        generated = model.tokenizer.decode(outs[0], skip_special_tokens=True)[len(prompt):].strip()
+                        harmless_refusal_decisions.append(is_refusal(generated))
+                    except:
                         harmless_refusal_decisions.append(False)
             
-            # Calculate conditional probabilities: P(refusal with steering | refusal at baseline)
-            # For harmful prompts
-            baseline_harmful_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmful"]) if refused]
-            if len(baseline_harmful_refused_indices) > 0:
-                still_refused_count = sum(1 for i in baseline_harmful_refused_indices if harmful_refusal_decisions[i])
-                results["harmful"]["conditional_rate"] = still_refused_count / len(baseline_harmful_refused_indices)
-                results["harmful"]["conditional_count"] = still_refused_count
-                results["harmful"]["baseline_refused_total"] = len(baseline_harmful_refused_indices)
+            # Conditional rates (existing)
+            baseline_harmful_refused = [i for i, r in enumerate(baseline_refusals["harmful"]) if r]
+            if len(baseline_harmful_refused) > 0:
+                still_refused = sum(1 for i in baseline_harmful_refused if harmful_refusal_decisions[i])
+                results["harmful"]["conditional_rate"] = still_refused / len(baseline_harmful_refused)
             else:
                 results["harmful"]["conditional_rate"] = 0
-                results["harmful"]["conditional_count"] = 0
-                results["harmful"]["baseline_refused_total"] = 0
             
-            # For harmless prompts
-            baseline_harmless_refused_indices = [i for i, refused in enumerate(baseline_refusals["harmless"]) if refused]
-            if len(baseline_harmless_refused_indices) > 0:
-                still_refused_count = sum(1 for i in baseline_harmless_refused_indices if harmless_refusal_decisions[i])
-                results["harmless"]["conditional_rate"] = still_refused_count / len(baseline_harmless_refused_indices)
-                results["harmless"]["conditional_count"] = still_refused_count
-                results["harmless"]["baseline_refused_total"] = len(baseline_harmless_refused_indices)
+            baseline_harmless_refused = [i for i, r in enumerate(baseline_refusals["harmless"]) if r]
+            if len(baseline_harmless_refused) > 0:
+                still_refused = sum(1 for i in baseline_harmless_refused if harmless_refusal_decisions[i])
+                results["harmless"]["conditional_rate"] = still_refused / len(baseline_harmless_refused)
             else:
                 results["harmless"]["conditional_rate"] = 0
-                results["harmless"]["conditional_count"] = 0
-                results["harmless"]["baseline_refused_total"] = 0
+            
+            # New metrics: bypass and induced
+            # Harmful bypass: previously refused but now not
+            harmful_bypass_count = sum(1 for i, r in enumerate(baseline_refusals["harmful"]) if r and not harmful_refusal_decisions[i])
+            results["harmful"]["bypass_rate"] = harmful_bypass_count / baseline_harmful_refused_count if baseline_harmful_refused_count > 0 else 0
+            
+            # Harmful induced: previously not refused but now refused
+            harmful_induced_count = sum(1 for i, r in enumerate(baseline_refusals["harmful"]) if not r and harmful_refusal_decisions[i])
+            harmful_non_refused_count = len(harmful_sample) - baseline_harmful_refused_count
+            results["harmful"]["induced_rate"] = harmful_induced_count / harmful_non_refused_count if harmful_non_refused_count > 0 else 0
+            
+            # Harmless bypass and induced (similarly)
+            harmless_bypass_count = sum(1 for i, r in enumerate(baseline_refusals["harmless"]) if r and not harmless_refusal_decisions[i])
+            results["harmless"]["bypass_rate"] = harmless_bypass_count / baseline_harmless_refused_count if baseline_harmless_refused_count > 0 else 0
+            
+            harmless_induced_count = sum(1 for i, r in enumerate(baseline_refusals["harmless"]) if not r and harmless_refusal_decisions[i])
+            harmless_non_refused_count = len(harmless_sample) - baseline_harmless_refused_count
+            results["harmless"]["induced_rate"] = harmless_induced_count / harmless_non_refused_count if harmless_non_refused_count > 0 else 0
             
             return results
 
@@ -479,8 +507,8 @@ def main(layers: List[int], top_k: int, alpha: float,
         single_up_hook = steering_hook(best_vec, +20.0)
         single_down_hook = steering_hook(best_vec, -20.0)
         
-        single_up_results = evaluate_conditional_only(+1, 20.0, single_up_hook, baseline_refusals)
-        single_down_results = evaluate_conditional_only(-1, 20.0, single_down_hook, baseline_refusals)
+        single_up_results = evaluate_metrics(+1, 20.0, single_up_hook, baseline_refusals)
+        single_down_results = evaluate_metrics(-1, 20.0, single_down_hook, baseline_refusals)
 
         steering_results.update({
             "single_20_up_harmful_conditional": single_up_results['harmful']['conditional_rate'],
@@ -493,14 +521,36 @@ def main(layers: List[int], top_k: int, alpha: float,
         multi3_up_hook = multi_feature_steering_hook(top3_vecs, +alpha_val)
         multi3_down_hook = multi_feature_steering_hook(top3_vecs, -alpha_val)
         
-        multi3_up_results = evaluate_conditional_only(+1, alpha_val, multi3_up_hook, baseline_refusals)
-        multi3_down_results = evaluate_conditional_only(-1, alpha_val, multi3_down_hook, baseline_refusals)
+        multi3_up_results = evaluate_metrics(+1, alpha_val, multi3_up_hook, baseline_refusals)
+        multi3_down_results = evaluate_metrics(-1, alpha_val, multi3_down_hook, baseline_refusals)
 
         steering_results.update({
             "top3_20_up_harmful_conditional": multi3_up_results['harmful']['conditional_rate'],
             "top3_20_up_harmless_conditional": multi3_up_results['harmless']['conditional_rate'],
             "top3_20_down_harmful_conditional": multi3_down_results['harmful']['conditional_rate'],
             "top3_20_down_harmless_conditional": multi3_down_results['harmless']['conditional_rate']
+        })
+        
+        # Add ablation evaluations
+        single_ablate_hook = ablation_hook(best_vec)
+        single_ablate_results = evaluate_metrics(0, 0.0, single_ablate_hook, baseline_refusals)
+
+        multi3_ablate_hook = multi_ablation_hook(top3_vecs)
+        multi3_ablate_results = evaluate_metrics(0, 0.0, multi3_ablate_hook, baseline_refusals)
+
+        steering_results.update({
+            "single_ablate_harmful_conditional": single_ablate_results['harmful']['conditional_rate'],
+            "single_ablate_harmless_conditional": single_ablate_results['harmless']['conditional_rate'],
+            "single_ablate_harmful_bypass": single_ablate_results['harmful']['bypass_rate'],
+            "single_ablate_harmless_bypass": single_ablate_results['harmless']['bypass_rate'],
+            "single_ablate_harmful_induced": single_ablate_results['harmful']['induced_rate'],
+            "single_ablate_harmless_induced": single_ablate_results['harmless']['induced_rate'],
+            "top3_ablate_harmful_conditional": multi3_ablate_results['harmful']['conditional_rate'],
+            "top3_ablate_harmless_conditional": multi3_ablate_results['harmless']['conditional_rate'],
+            "top3_ablate_harmful_bypass": multi3_ablate_results['harmful']['bypass_rate'],
+            "top3_ablate_harmless_bypass": multi3_ablate_results['harmless']['bypass_rate'],
+            "top3_ablate_harmful_induced": multi3_ablate_results['harmful']['induced_rate'],
+            "top3_ablate_harmless_induced": multi3_ablate_results['harmless']['induced_rate']
         })
         
         result_dict[str(layer)].update(steering_results)
