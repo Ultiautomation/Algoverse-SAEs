@@ -82,6 +82,46 @@ def multi_layer_steering_hooks(layer_feature_pairs: List[tuple], strength: float
     return hooks
 
 
+def cosine_similarity_analysis(sae, model_activations: torch.Tensor, labels: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """
+    Compute cosine similarity between SAE feature directions and refusal direction.
+    
+    Args:
+        sae: The SAE model with decoder weights
+        model_activations: Raw model activations (N × d_model) 
+        labels: Binary labels (N,) where 1=harmful, 0=harmless
+    
+    Returns:
+        Dictionary with cosine similarities and analysis results
+    """
+    # Compute refusal direction using difference in means
+    harmful_acts = model_activations[labels == 1]
+    harmless_acts = model_activations[labels == 0]
+    refusal_direction = (harmful_acts.mean(0) - harmless_acts.mean(0))
+    refusal_direction = refusal_direction / (refusal_direction.norm() + 1e-8)
+    
+    # Get all SAE decoder directions (16k features × d_model)
+    decoder_directions = sae.W_dec  # shape: (n_features, d_model)
+    
+    # Normalize decoder directions
+    decoder_norms = decoder_directions.norm(dim=1, keepdim=True) + 1e-8
+    decoder_directions_norm = decoder_directions / decoder_norms
+    
+    # Compute cosine similarities (vectorized)
+    cosine_sims = torch.matmul(decoder_directions_norm, refusal_direction)  # shape: (n_features,)
+    
+    # Find feature with highest cosine similarity
+    max_cosine_sim, max_cosine_idx = torch.max(cosine_sims.abs(), dim=0)
+    
+    return {
+        'cosine_similarities': cosine_sims,
+        'max_cosine_similarity': max_cosine_sim.item(),
+        'max_cosine_feature_idx': max_cosine_idx.item(),
+        'refusal_direction': refusal_direction,
+        'decoder_directions_norm': decoder_directions_norm
+    }
+
+
 def combined_scores(pb_scores: torch.Tensor, mi_scores: torch.Tensor, 
                    method: str = "normalized_product") -> torch.Tensor:
     """
@@ -194,14 +234,24 @@ def main(layers: List[int], top_k: int, alpha: float,
         hook_name = f'blocks.{layer}.hook_resid_post'
 
         # 2 – collect activations at final position
-        feats = []
+        feats = []  # SAE activations
+        raw_acts = []  # Raw model activations for cosine similarity analysis
         for i in tqdm(range(0, len(combined_prompts), BATCH),
                       desc=f"Layer {layer} acts"):
             batch = combined_prompts[i:i + BATCH]
-            _, cache = model.run_with_cache_with_saes(batch, saes=[sae])
-            acts_final = cache[f"{hook_name}.hook_sae_output"][:, -1, :]
+            
+            # First, get raw model activations (without SAE)
+            _, raw_cache = model.run_with_cache(batch)
+            raw_acts_final = raw_cache[hook_name][:, -1, :]  # Raw model activations
+            raw_acts.append(raw_acts_final)
+            
+            # Then, get SAE activations
+            _, sae_cache = model.run_with_cache_with_saes(batch, saes=[sae])
+            acts_final = sae_cache[f"{hook_name}.hook_sae_output"][:, -1, :]  # SAE features
             feats.append(acts_final)
-        feats = torch.cat(feats)                         # N × d
+            
+        feats = torch.cat(feats)                         # N × d_sae
+        raw_acts = torch.cat(raw_acts)                   # N × d_model
 
         # 3 – score features using selected metric(s)
         if metric == "both":
@@ -277,6 +327,26 @@ def main(layers: List[int], top_k: int, alpha: float,
             scores = combined_vals
             primary_method = "combined"
         
+        elif metric == "cosine":
+            print(f"Layer {layer}: Using cosine similarity with refusal direction")
+            
+            # Compute cosine similarities using our existing function
+            cosine_analysis = cosine_similarity_analysis(sae, raw_acts, combined_labels)
+            cosine_similarities = cosine_analysis['cosine_similarities']
+            
+            # Use absolute cosine similarities as scores (higher = more aligned)
+            scores = cosine_similarities.abs()
+            top_vals, top_idx = torch.topk(scores, top_k)
+            
+            csv_path = out_dir / f"layer{layer}_top{top_k}_cosine.csv"
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["feature_idx", "cosine_similarity_abs"])
+                writer.writerows(zip(top_idx.tolist(), top_vals.tolist()))
+            print(f"✓ saved {csv_path}")
+            
+            primary_method = "cosine"
+        
         else:  # pb
             scores = point_biserial(feats, combined_labels)
             print(f"Layer {layer}: Using point-biserial correlation scoring")
@@ -289,6 +359,46 @@ def main(layers: List[int], top_k: int, alpha: float,
             print(f"✓ saved {csv_path}")
             primary_method = "pb"
 
+        # COSINE SIMILARITY ANALYSIS - Sanity check against refusal direction
+        print(f"Layer {layer}: Running cosine similarity analysis with refusal direction")
+        cosine_analysis = cosine_similarity_analysis(sae, raw_acts, combined_labels)
+        
+        max_cosine_feature = cosine_analysis['max_cosine_feature_idx']
+        max_cosine_sim = cosine_analysis['max_cosine_similarity']
+        
+        # Find where the max cosine similarity feature ranks in our correlation ordering
+        correlation_ranking = (top_idx == max_cosine_feature).nonzero(as_tuple=True)[0]
+        if len(correlation_ranking) > 0:
+            cosine_feature_rank = correlation_ranking[0].item() + 1  # 1-indexed rank
+            cosine_in_top_k = True
+        else:
+            # Feature not in top-k, find its actual rank
+            all_scores_sorted = torch.argsort(scores.abs(), descending=True)
+            rank_matches = (all_scores_sorted == max_cosine_feature).nonzero(as_tuple=True)[0]
+            if len(rank_matches) > 0:
+                cosine_feature_rank = rank_matches[0].item() + 1
+            else:
+                # Feature index might be out of range, set a default
+                cosine_feature_rank = len(scores) + 1  # Rank it last
+                print(f"  Warning: Feature {max_cosine_feature} not found in correlation scores")
+            cosine_in_top_k = False
+        
+        print(f"  Max cosine similarity: {max_cosine_sim:.4f} (feature {max_cosine_feature})")
+        print(f"  This feature ranks #{cosine_feature_rank} in {primary_method} correlation ordering")
+        print(f"  Feature in top-{top_k}: {cosine_in_top_k}")
+        
+        # If survey mode, skip steering analysis and continue to next layer
+        if args.survey:
+            result_dict[str(layer)] = {
+                "max_cosine_feature": max_cosine_feature,
+                "max_cosine_similarity": max_cosine_sim,
+                "cosine_feature_rank_in_correlation": cosine_feature_rank,
+                "cosine_feature_in_top_k": cosine_in_top_k,
+                "primary_method": primary_method
+            }
+            print(f"Survey mode: Skipping steering analysis for layer {layer}\n")
+            continue
+        
         # save for steering - single and top-3 only
         best_feat = top_idx[0].item()
         best_vec  = sae.W_dec[best_feat].detach()
@@ -303,7 +413,12 @@ def main(layers: List[int], top_k: int, alpha: float,
             "score": top_vals[0].item(),
             "top3_features": top3_feats,
             "metric_used": metric,
-            "primary_method": primary_method
+            "primary_method": primary_method,
+            # Cosine similarity analysis results
+            "cosine_max_similarity": max_cosine_sim,
+            "cosine_max_feature": max_cosine_feature,
+            "cosine_feature_rank_in_correlation": cosine_feature_rank,
+            "cosine_feature_in_top_k": cosine_in_top_k
         }
 
         if metric == "combined":
@@ -560,13 +675,13 @@ def main(layers: List[int], top_k: int, alpha: float,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--layers", default="15,16,17,18,19,20",
+    ap.add_argument("--layers", default="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25",
                     help="Comma-separated residual layers to analyse.")
     ap.add_argument("--top-k", type=int, default=15)
     ap.add_argument("--alpha",  type=float, default=5.0,
                     help="Steering strength multiplier.")
-    ap.add_argument("--metric", choices=["pb", "mi", "both", "combined"], default="pb",
-                    help="Correlation metric: point-biserial, mutual-info, both for comparison, or combined.")
+    ap.add_argument("--metric", choices=["pb", "mi", "both", "combined", "cosine"], default="pb",
+                    help="Correlation metric: point-biserial, mutual-info, both for comparison, combined, or cosine similarity with refusal direction.")
     ap.add_argument("--combine-method", choices=["normalized_product", "weighted_sum", "rank_fusion"], default="normalized_product",
                     help="Method for combining PB and MI scores when using --metric combined.")
     ap.add_argument("--out-dir", type=Path, default=Path("sae_latent_out"))
@@ -574,6 +689,8 @@ if __name__ == "__main__":
                     help="Quick analysis mode: use only 10 prompts per category for fast testing")
     ap.add_argument("--sample-size", type=int, default=None,
                     help="Number of prompts per category (harmful/harmless). Overrides --quick")
+    ap.add_argument("--survey", action="store_true",
+                    help="Survey mode: only identify top cosine similarity feature per layer, skip steering analysis")
     args = ap.parse_args()
 
     layer_idx = [int(x) for x in args.layers.split(",") if x.strip()]
