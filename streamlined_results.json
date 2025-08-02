@@ -1,0 +1,42 @@
+{
+  "0": {
+    "feature": 8613,
+    "score": 0.7113826274871826,
+    "top3_features": [
+      8613,
+      16300,
+      3111
+    ],
+    "metric_used": "cosine",
+    "primary_method": "cosine",
+    "cosine_max_similarity": 0.7113826274871826,
+    "cosine_max_feature": 8613,
+    "cosine_feature_rank_in_correlation": 1,
+    "cosine_feature_in_top_k": true,
+    "avg_projection": 17.51764488220215,
+    "relative_strength": 1.141705984056273,
+    "baseline_harmful_refused_count": 239,
+    "baseline_harmless_refused_count": 8,
+    "baseline_total": 250,
+    "single_20_up_harmful_conditional": 0.9790794979079498,
+    "single_20_up_harmless_conditional": 0.5,
+    "single_20_down_harmful_conditional": 0.9874476987447699,
+    "single_20_down_harmless_conditional": 0.625,
+    "top3_20_up_harmful_conditional": 0.9832635983263598,
+    "top3_20_up_harmless_conditional": 0.5,
+    "top3_20_down_harmful_conditional": 0.9665271966527197,
+    "top3_20_down_harmless_conditional": 0.5,
+    "single_ablate_harmful_conditional": 0.0,
+    "single_ablate_harmless_conditional": 0.0,
+    "single_ablate_harmful_bypass": 1.0,
+    "single_ablate_harmless_bypass": 1.0,
+    "single_ablate_harmful_induced": 0.0,
+    "single_ablate_harmless_induced": 0.0,
+    "top3_ablate_harmful_conditional": 0.0,
+    "top3_ablate_harmless_conditional": 0.0,
+    "top3_ablate_harmful_bypass": 1.0,
+    "top3_ablate_harmless_bypass": 1.0,
+    "top3_ablate_harmful_induced": 0.0,
+    "top3_ablate_harmless_induced": 0.0
+  }
+}
