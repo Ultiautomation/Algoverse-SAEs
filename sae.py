@@ -180,7 +180,7 @@ def multi_ablation_hook(latent_vecs: List[torch.Tensor]):
 
 # --------------------------------------------------------------------------- #
 def main(layers: List[int], top_k: int, alpha: float,
-         metric: str, out_dir: Path, args):
+         metric: str, out_dir: Path, args, k_values: List[int] = [1, 3]):
 
     out_dir.mkdir(exist_ok=True, parents=True)
 
@@ -203,8 +203,8 @@ def main(layers: List[int], top_k: int, alpha: float,
         sample_size = 10
         print("Quick mode: Using 10 prompts per category")
     else:
-        sample_size = 250
-        print("Full mode: Using 250 prompts per category")
+        sample_size = 50
+        print("Full mode: Using 50 prompts per category")
     
     harmful_prompts = harmful_ds["prompt"][:sample_size]
     
@@ -399,19 +399,30 @@ def main(layers: List[int], top_k: int, alpha: float,
             print(f"Survey mode: Skipping steering analysis for layer {layer}\n")
             continue
         
-        # save for steering - single and top-3 only
+        # save for steering - single and k-sparse
         best_feat = top_idx[0].item()
         best_vec  = sae.W_dec[best_feat].detach()
         
-        # Get top 3 features for multi-feature steering
-        top3_feats = top_idx[:3].tolist()
-        top3_vecs = [sae.W_dec[f].detach() for f in top3_feats]
+        # Get top-k features for k-sparse steering (for each k in k_values)
+        max_k = max(k_values) if k_values else 3
+        topk_feats = top_idx[:max_k].tolist()
+        topk_vecs = [sae.W_dec[f].detach() for f in topk_feats]
+        
+        # Prepare k-sparse feature sets
+        k_sparse_sets = {}
+        for k in k_values:
+            if k <= len(topk_feats):
+                k_sparse_sets[k] = {
+                    'features': topk_feats[:k],
+                    'vectors': topk_vecs[:k]
+                }
         
         # Update layer_results
         layer_results = {
             "feature": best_feat,
             "score": top_vals[0].item(),
-            "top3_features": top3_feats,
+            "k_sparse_features": {str(k): k_sparse_sets[k]['features'] for k in k_sparse_sets},
+            "k_values_tested": k_values,
             "metric_used": metric,
             "primary_method": primary_method,
             # Cosine similarity analysis results
@@ -619,54 +630,60 @@ def main(layers: List[int], top_k: int, alpha: float,
             "baseline_total": len(baseline_refusals['harmful'])
         }
         
-        single_up_hook = steering_hook(best_vec, +20.0)
-        single_down_hook = steering_hook(best_vec, -20.0)
-        
-        single_up_results = evaluate_metrics(+1, 20.0, single_up_hook, baseline_refusals)
-        single_down_results = evaluate_metrics(-1, 20.0, single_down_hook, baseline_refusals)
-
-        steering_results.update({
-            "single_20_up_harmful_conditional": single_up_results['harmful']['conditional_rate'],
-            "single_20_up_harmless_conditional": single_up_results['harmless']['conditional_rate'],
-            "single_20_down_harmful_conditional": single_down_results['harmful']['conditional_rate'],
-            "single_20_down_harmless_conditional": single_down_results['harmless']['conditional_rate']
-        })
-        
+        # K-sparse steering experiments for all k values
         alpha_val = 20.0
-        multi3_up_hook = multi_feature_steering_hook(top3_vecs, +alpha_val)
-        multi3_down_hook = multi_feature_steering_hook(top3_vecs, -alpha_val)
         
-        multi3_up_results = evaluate_metrics(+1, alpha_val, multi3_up_hook, baseline_refusals)
-        multi3_down_results = evaluate_metrics(-1, alpha_val, multi3_down_hook, baseline_refusals)
-
-        steering_results.update({
-            "top3_20_up_harmful_conditional": multi3_up_results['harmful']['conditional_rate'],
-            "top3_20_up_harmless_conditional": multi3_up_results['harmless']['conditional_rate'],
-            "top3_20_down_harmful_conditional": multi3_down_results['harmful']['conditional_rate'],
-            "top3_20_down_harmless_conditional": multi3_down_results['harmless']['conditional_rate']
-        })
+        for k in k_values:
+            if k not in k_sparse_sets:
+                continue
+                
+            k_vecs = k_sparse_sets[k]['vectors']
+            
+            if k == 1:
+                # Single feature steering (k=1)
+                up_hook = steering_hook(k_vecs[0], +alpha_val)
+                down_hook = steering_hook(k_vecs[0], -alpha_val)
+                ablate_hook = ablation_hook(k_vecs[0])
+            else:
+                # Multi-feature steering (k>1)
+                up_hook = multi_feature_steering_hook(k_vecs, +alpha_val)
+                down_hook = multi_feature_steering_hook(k_vecs, -alpha_val)
+                ablate_hook = multi_ablation_hook(k_vecs)
+            
+            # Test additive steering
+            up_results = evaluate_metrics(+1, alpha_val, up_hook, baseline_refusals)
+            down_results = evaluate_metrics(-1, alpha_val, down_hook, baseline_refusals)
+            
+            # Test ablation
+            ablate_results = evaluate_metrics(0, 0.0, ablate_hook, baseline_refusals)
+            
+            # Store results with k-specific keys
+            steering_results.update({
+                f"k{k}_20_up_harmful_conditional": up_results['harmful']['conditional_rate'],
+                f"k{k}_20_up_harmless_conditional": up_results['harmless']['conditional_rate'],
+                f"k{k}_20_up_harmful_bypass": up_results['harmful']['bypass_rate'],
+                f"k{k}_20_up_harmless_bypass": up_results['harmless']['bypass_rate'],
+                f"k{k}_20_up_harmful_induced": up_results['harmful']['induced_rate'],
+                f"k{k}_20_up_harmless_induced": up_results['harmless']['induced_rate'],
+                
+                f"k{k}_20_down_harmful_conditional": down_results['harmful']['conditional_rate'],
+                f"k{k}_20_down_harmless_conditional": down_results['harmless']['conditional_rate'],
+                f"k{k}_20_down_harmful_bypass": down_results['harmful']['bypass_rate'],
+                f"k{k}_20_down_harmless_bypass": down_results['harmless']['bypass_rate'],
+                f"k{k}_20_down_harmful_induced": down_results['harmful']['induced_rate'],
+                f"k{k}_20_down_harmless_induced": down_results['harmless']['induced_rate'],
+                
+                f"k{k}_ablate_harmful_conditional": ablate_results['harmful']['conditional_rate'],
+                f"k{k}_ablate_harmless_conditional": ablate_results['harmless']['conditional_rate'],
+                f"k{k}_ablate_harmful_bypass": ablate_results['harmful']['bypass_rate'],
+                f"k{k}_ablate_harmless_bypass": ablate_results['harmless']['bypass_rate'],
+                f"k{k}_ablate_harmful_induced": ablate_results['harmful']['induced_rate'],
+                f"k{k}_ablate_harmless_induced": ablate_results['harmless']['induced_rate']
+            })
+            
+            print(f"  K={k} steering: +20 bypass {up_results['harmful']['bypass_rate']:.1%}, -20 bypass {down_results['harmful']['bypass_rate']:.1%}, ablate bypass {ablate_results['harmful']['bypass_rate']:.1%}")
         
-        # Add ablation evaluations
-        single_ablate_hook = ablation_hook(best_vec)
-        single_ablate_results = evaluate_metrics(0, 0.0, single_ablate_hook, baseline_refusals)
-
-        multi3_ablate_hook = multi_ablation_hook(top3_vecs)
-        multi3_ablate_results = evaluate_metrics(0, 0.0, multi3_ablate_hook, baseline_refusals)
-
-        steering_results.update({
-            "single_ablate_harmful_conditional": single_ablate_results['harmful']['conditional_rate'],
-            "single_ablate_harmless_conditional": single_ablate_results['harmless']['conditional_rate'],
-            "single_ablate_harmful_bypass": single_ablate_results['harmful']['bypass_rate'],
-            "single_ablate_harmless_bypass": single_ablate_results['harmless']['bypass_rate'],
-            "single_ablate_harmful_induced": single_ablate_results['harmful']['induced_rate'],
-            "single_ablate_harmless_induced": single_ablate_results['harmless']['induced_rate'],
-            "top3_ablate_harmful_conditional": multi3_ablate_results['harmful']['conditional_rate'],
-            "top3_ablate_harmless_conditional": multi3_ablate_results['harmless']['conditional_rate'],
-            "top3_ablate_harmful_bypass": multi3_ablate_results['harmful']['bypass_rate'],
-            "top3_ablate_harmless_bypass": multi3_ablate_results['harmless']['bypass_rate'],
-            "top3_ablate_harmful_induced": multi3_ablate_results['harmful']['induced_rate'],
-            "top3_ablate_harmless_induced": multi3_ablate_results['harmless']['induced_rate']
-        })
+        # All steering experiments (including ablation) are now handled in the k-sparse loop above
         
         result_dict[str(layer)].update(steering_results)
 
@@ -691,7 +708,21 @@ if __name__ == "__main__":
                     help="Number of prompts per category (harmful/harmless). Overrides --quick")
     ap.add_argument("--survey", action="store_true",
                     help="Survey mode: only identify top cosine similarity feature per layer, skip steering analysis")
+    ap.add_argument("--k-sparse", type=str, default="1,3",
+                    help="Comma-separated k values for k-sparse steering (e.g., '1,2,3,5,10')")
+    ap.add_argument("--phase1", action="store_true",
+                    help="Phase 1 mode: focus on high-cosine-similarity layers (0,1,2,15) with k-sparse steering")
     args = ap.parse_args()
 
     layer_idx = [int(x) for x in args.layers.split(",") if x.strip()]
-    main(layer_idx, args.top_k, args.alpha, args.metric, args.out_dir, args)
+    
+    # Phase 1: Focus on high-cosine-similarity layers
+    if args.phase1:
+        layer_idx = [0, 1, 2, 15]  # Top cosine similarity layers
+        print(f"Phase 1 mode: focusing on high-cosine-similarity layers {layer_idx}")
+    
+    # Parse k-sparse values
+    k_values = [int(x.strip()) for x in args.k_sparse.split(",") if x.strip()]
+    print(f"K-sparse steering values: {k_values}")
+    
+    main(layer_idx, args.top_k, args.alpha, args.metric, args.out_dir, args, k_values)
