@@ -221,6 +221,7 @@ def run_layerwise_ig(prompt, model, tokenizer, refusal_terms, baseline_strategy=
     }
 
 def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_strategy="pad", n_steps=20, exclude_bos=True):
+
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -228,27 +229,26 @@ def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_
 
     print(f"prompt: {prompt}, refusal_terms: {refusal_terms}, baseline_strategy: {baseline_strategy}, n_steps: {n_steps}, exclude_bos: {exclude_bos}")
     
+    # Tokenize input
     inputs = tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(device)
     attention_mask = inputs["attention_mask"].to(device)
-
     tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
 
-    # Determine BOS token index only if exclude_bos is True
-    bos_token_index = None
-    if exclude_bos:
-        bos_token = tokenizer.bos_token
-        if bos_token is not None:
-            try:
-                bos_token_index = tokens.index(bos_token)
-            except ValueError:
-                pass  # BOS token not found i
-                n tokens
+    # Determine BOS token index if needed
+    bos_token_index = None
+    if exclude_bos and tokenizer.bos_token is not None:
+        try:
+            bos_token_index = tokens.index(tokenizer.bos_token)
+        except ValueError:
+            pass  # BOS token not found
+
     layerwise_attributions = {}
     aggregate_token_scores = {}
 
-    for layer_idx in range(len(model.model.layers)):  
-        layer = model.model.layers [layer_idx]
+    # Loop through model layers
+    for layer_idx in range(len(model.model.layers)):
+        layer = model.model.layers[layer_idx]
 
         embeddings = model.get_input_embeddings()(input_ids).detach().requires_grad_(True)
         baseline = get_baseline(input_ids, model, tokenizer, strategy=baseline_strategy).to(device)
@@ -263,7 +263,7 @@ def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_
             target_tokens = tokenizer.tokenize(phrase)
             token_ids = tokenizer.convert_tokens_to_ids(target_tokens)
 
-            if len(token_ids) == 0:
+            if not token_ids:
                 print(f"Skipping unknown phrase: {phrase}")
                 continue
 
@@ -272,7 +272,7 @@ def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_
 
                 def wrapped_forward(embeds):
                     outputs = model(inputs_embeds=embeds, attention_mask=attention_mask)
-                    return outputs.logits[:, :, token_id].sum(dim=1)  # shape: (batch_size,)
+                    return outputs.logits[:, :, token_id].sum(dim=1)
 
                 lc = LayerConductance(wrapped_forward, layer)
 
@@ -298,27 +298,25 @@ def run_layerwise_conductance(prompt, model, tokenizer, refusal_terms, baseline_
                 except Exception as e:
                     print(f"Layer {layer_idx} - Token '{token_str}' conductance failed: {e}")
 
+        # Format per-layer attributions
         token_scores_dict = {
-    token_str: [
+            token_str: [
                 (tok, score)
                 for i, (tok, score) in enumerate(zip(tokens, attr_tensor.sum(dim=-1).squeeze(0).tolist()))
                 if not exclude_bos or i != bos_token_index
             ]
             for token_str, attr_tensor in layer_token_attrs.items()
-        }       }
+        }
 
         layerwise_attributions[f"layer_{layer_idx}"] = token_scores_dict
 
-    aggregate_token_scores_readable = {
-token_str: [
-            (tok, score)
-            for i, (tok, score) in enumerate(zip(tokens, score.tolist()))
-            if not exclude_bos or i != bos_token_index
-        ]
-        for token_str, score in aggregate_token_scores.items()
-    }
-()
-    }
+    # Format aggregate attribution scores
+    aggregate_token_scores_readable = {token_str: [
+            (tok, score)
+            for i, (tok, score) in enumerate(zip(tokens, score.tolist()))
+            if not exclude_bos or i != bos_token_index
+        ]
+        for token_str, score in aggregate_token_scores.items()}
 
     return {
         "layerwise": layerwise_attributions,
