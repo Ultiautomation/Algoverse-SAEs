@@ -312,7 +312,7 @@ def main():
                 tokenizer,
                 refusal_terms,
                 baseline_strategy="pad",
-                n_steps=20
+                n_steps=20,
                 exclude_bos=True
             )
             print("Layerwise conductance result for prompt {i}: {layerwise_cond_result}")
