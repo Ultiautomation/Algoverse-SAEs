@@ -341,7 +341,7 @@ def main():
                 n_steps=20,
                 exclude_bos=True
             )
-            print("Layerwise conductance result for prompt {i}: {layerwise_cond_result}")
+            print(f"Layerwise conductance result for prompt {i}: {layerwise_cond_result}")
 
             unload_model(instruct_model)
             print("Tuned model unloaded from memory.")
