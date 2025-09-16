@@ -17,16 +17,16 @@ hugging_face_token = os.getenv('hugging_face_token')
 
 def main():
     # Set output file path
-    sampled_path = "outputs/sampled.csv"
+    sampled_path = "outputs/sampled_refusal.csv"
     
     # Check if sampled.csv exists
     if os.path.exists(sampled_path):
-        print("✅ Found existing 'sampled.csv', loading it...")
+        print("✅ Found existing 'sampled_refusal.csv', loading it...")
         sampled_df = pd.read_csv(sampled_path)
         pd.set_option('display.max_colwidth', None)
         print(sampled_df.head())
     else:
-        print("⚙️ No 'sampled.csv' found. Running sampling...")
+        print("⚙️ No 'sampled_refusal.csv' found. Running sampling...")
         # Load toxicity scored data (CSV data)
         if "Refusal_outputs" not in sampled_df.columns:
             refusal_terms = [
@@ -67,13 +67,13 @@ def main():
                 "is a subject of some contention", "The answer is too long to show", "the request is too long to fulfill",
                 "can vary significantly depending on"
             ]
-            sampled_df["Refusal_outputs"] = sampled_df["Instruct_Model_Response"].apply(
+            sampled_df["Refusal_outputs_New"] = sampled_df["Instruct_Model_Response_New"].apply(
                 lambda x: extract_refusal_phrases(x, refusal_terms)
             )
-            refusal_is_na = sampled_df['Refusal_outputs'].isna().any()
+            refusal_is_na = sampled_df['Refusal_outputs_New'].isna().any()
             print(f"Prompts have a corresponding NaN value for refusal phrase: {refusal_is_na}")
-            sampled_df = sampled_df[~(sampled_df["Refusal_outputs"].isna() | (sampled_df["Refusal_outputs"] == ""))]
-            sampled_df.reset_index(drop=True, inplace=True)
+            # sampled_df = sampled_df[~(sampled_df["Refusal_outputs_New"].isna() | (sampled_df["Refusal_outputs_New"] == ""))]
+            # sampled_df.reset_index(drop=True, inplace=True)
             print("Remaining records after dropping empty/NaN Refusal_outputs:", len(sampled_df))
         else: 
             print("'Refusal_outputs' column already exists. Skipping extraction step.")
@@ -303,8 +303,8 @@ def main():
     ## RUN LAYERWISE CONSDUCTANCE
     # Settings for layerwise conductance
     COND_SAVE_EVERY = 10
-    LAYERWISE_COND_SAVE_PATH = "outputs/layerwise_cond_partial_results.pkl"
-    FINAL_COND_SAVE_PATH = "outputs/layerwise_cond_full_results.pkl"
+    LAYERWISE_COND_SAVE_PATH = "outputs/layerwise_cond_partial_results_new.pkl"
+    FINAL_COND_SAVE_PATH = "outputs/layerwise_cond_full_results_new.pkl"
 
     # Restore partial results
     layerwise_cond_records = []
@@ -320,7 +320,7 @@ def main():
         prompt = row['Prompt']
         print(f"\n[Prompt {i}] {prompt}")
 
-        refusal_terms = row.get("Refusal_outputs", "").split("; ")
+        refusal_terms = row.get("Refusal_outputs_New", "").split("; ")
         refusal_terms = [term.strip() for term in refusal_terms if term.strip()]
 
         if not refusal_terms:
@@ -352,7 +352,8 @@ def main():
                 'id': row['id'],
                 'category': row['category'],
                 'subcategory': row['subcategory'],
-                'Instruct_Response': row['Instruct_Model_Response'],
+                'Instruct_Response': row['Instruct_Model_Response_New'],
+                'Refusal_Output': row['Refusal_outputs_New'],
                 'Layerwise_Conductance': layerwise_cond_result,
                 'Time_Taken': elapsed
             })
